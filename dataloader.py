@@ -266,6 +266,7 @@ def preprocess_training_examples(examples, tokenizer, max_context_len):
     inputs = tokenizer(
         examples["context"] + "\n" + examples["question"] + " [ACT]",
         return_offsets_mapping=True,
+        # return_tensors="pt",
     )
     # print(tokenizer.convert_ids_to_tokens(inputs["input_ids"]))
 
@@ -279,8 +280,8 @@ def preprocess_training_examples(examples, tokenizer, max_context_len):
         while idx >= 0 and offset_mapping[idx][1] >= char_idx:
             idx -= 1
         end_positions.append(idx + 2)
-        print(char_idx, offset_mapping[idx + 2])
-        print(examples["context"][char_idx], inputs["input_ids"][idx + 2])
+        # print(char_idx, offset_mapping[idx + 2])
+        # print(examples["context"][char_idx], inputs["input_ids"][idx + 2])
 
     # # sample_map = inputs.pop("overflow_to_sample_mapping") #  Since one sample can give several features, it maps each feature to the example it originated from
     # answers = examples["answers"]

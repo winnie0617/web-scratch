@@ -31,7 +31,7 @@ def main(cfg: DictConfig):
         convert_to_qa_format,
         batched=False,
         remove_columns=list(cols_to_remove)
-    ).rename_column("cleaned_html", "context").select(range(100))
+    ).rename_column("cleaned_html", "context").select(range(3)) # TODO: only using 10 samples right now
     
     # for i in range(10):
     #     print(train_dataset[i]["answer"]["answer_start"])
@@ -50,6 +50,7 @@ def main(cfg: DictConfig):
     
     # add new token
     tokenizer.add_tokens(["[ACT]"])
+    model.resize_token_embeddings(len(tokenizer))
     params = model.state_dict()
     embeddings = params['embed_tokens.weight']
     pre_expansion_embeddings = embeddings[:-1,:]
@@ -64,6 +65,7 @@ def main(cfg: DictConfig):
     batched=False, #TODO: just don't batch?
     remove_columns=train_dataset.column_names,
     )
+    train_dataset.set_format("pt", columns=["input_ids", "attention_mask"], output_all_columns=True)
     train_dataloader = DataLoader(
         train_dataset, shuffle=True, batch_size=cfg.train.batch_size
     )
@@ -102,7 +104,7 @@ def main(cfg: DictConfig):
             model.train()
 
             if len(idxs) < batch_size // grad_accum:
-                idxs = list(range(len(x)))
+                idxs = list(range(len(dataset)))
                 random.shuffle(idxs)
             batch_idxs = idxs[: batch_size // grad_accum]
             idxs = idxs[batch_size // grad_accum :]
@@ -113,11 +115,15 @@ def main(cfg: DictConfig):
             # batch_y = [y[i] for i in batch_idxs]
             # combined_sequences = tokenize_gpt2_batch(tok, batch_x, batch_y)
             # Note: the ** operator will unpack a dictionary into keyword arguments to a function (such as your model)
-            model_output = model(**dataset[batch_idxs], use_cache=False)
+            # end_position = dataset.pop("end_position")
+            # print(end_position)
+            # select dataset with indices
+            batch_data = dataset.select(batch_idxs)
+            # check shape of model embedding layer
+            model_output = model(batch_data["input_ids"].to(DEVICE), batch_data["attention_mask"].to(DEVICE), use_cache=False)
             # 3. Run the model on the batch, get the logits, and compute the loss using the get_loss function you implemented
             loss = get_loss(model_output) / grad_accum
             print("Compare", model_output.loss / grad_accum, loss)
-
             loss.backward()
             
             if (step+1) % grad_accum == 0: # don't want to take a step at step 0
