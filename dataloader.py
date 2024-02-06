@@ -261,6 +261,7 @@ def preprocess_training_examples(examples, tokenizer, max_context_len):
     """
     Tokenize and break down long context
     """
+    # TODO: implementation right now is SUPER SLOW
     questions = [q.strip() for q in examples["question"]]
         
     inputs = tokenizer(
@@ -325,7 +326,7 @@ def preprocess_training_examples(examples, tokenizer, max_context_len):
     #         end_positions.append(idx + 1)
 
     # inputs["start_positions"] = start_positions
-    inputs["end_positions"] = end_positions
+    inputs["labels"] = end_positions
     
     # Set end token to be the ">" of the starting tag
     return inputs

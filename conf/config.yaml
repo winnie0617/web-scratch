@@ -1,12 +1,12 @@
 defaults:
   - _self_
   - model: mistral
-  # - model: bert-base-cased
 
 train:
   # neg_ratio: 5
-  batch_size: 32
+  batch_size: 1
   learning_rate: 3e-5
+  gradient_accumulation_steps: 2
   eval_batch_size: 300
   epoch: 5
   warmup_steps: 0.5
@@ -24,7 +24,7 @@ data:
 
 hydra:
   run:
-    dir: log
+    dir: output
   job:
     chdir: False
   verbose: INFO
