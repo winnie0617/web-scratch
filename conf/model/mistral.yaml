@@ -1,2 +1,10 @@
-name: mistral
-model_name_or_path : "mistralai/Mistral-7B-v0.1"
+# name: mistral
+pretrained_model_name_or_path : "mistralai/Mistral-7B-v0.1"
+# cache_dir: 
+return_dict: true
+# quantization: false
+device_map: auto
+low_cpu_mem_usage: true
+# torch_dtype: bfloat16
+rope_theta: 10000.0
+attn_implementation: flash_attention_2

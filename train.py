@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
-    logger.info(f"Use model {cfg.model.model_name_or_path}")
+    logger.info(f"Use model {cfg.model.pretrained_model_name_or_path}")
     output_dir = HydraConfig.get().runtime.output_dir
     train_dataset = get_data_split(
         cfg.data.data_path, cfg.data.train_split_file, is_train=True
@@ -41,9 +41,11 @@ def main(cfg: DictConfig):
     # print(train_dataset)
     # print(train_dataset[0]["answer"])
     
-    # model = AutoModel.from_pretrained(cfg.model.model_name_or_path, load_in_8bit=True, device_map="auto", use_cache=False) # TODO: hard coded
-    model = AutoModelForCausalLM.from_pretrained(cfg.model.model_name_or_path, torch_dtype=torch.bfloat16, device_map="auto", use_cache=False) # TODO: hard coded
-    tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_name_or_path)
+    # model = AutoModel.from_pretrained(cfg.model.pretrained_model_name_or_path, load_in_8bit=True, device_map="auto", use_cache=False) # TODO: hard coded
+    print(cfg.model)
+    print("============")
+    model = AutoModelForCausalLM.from_pretrained(**cfg.model, torch_dtype=torch.bfloat16) # TODO: hard coded
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.pretrained_model_name_or_path)
     tokenizer.pad_token = tokenizer.eos_token # should be ok for casual LM
 
     # add new token
@@ -104,12 +106,12 @@ def main(cfg: DictConfig):
             Compute triplet loss
             """
             # TODO: limit token length for now
-            model_output = model(inputs["input_ids"][:,-5000:], inputs["attention_mask"][:,-5000:], output_hidden_states=True)
+            model_output = model(inputs["input_ids"], inputs["attention_mask"], output_hidden_states=True)
             hidden_states = model_output.hidden_states[0] # model_output.hidden_states is a tuple
             # shape is [batch_size, seq_len, hidden_dim]
             # print(hidden_states.shape)
             act = hidden_states[:,-1,:]
-            pos = hidden_states[:,inputs["labels"][0][0]%5000,:] # TODO: right now only using the first positive candidate and only works for batch size 1
+            pos = hidden_states[:,inputs["labels"][0][0],:] # TODO: right now only using the first positive candidate and only works for batch size 1
             loss = (act @ pos.T).flatten()[0] # TODO: fix this, only works for batch size 1
             return loss
     
@@ -118,14 +120,14 @@ def main(cfg: DictConfig):
         overwrite_output_dir=True,
         evaluation_strategy="no",
         optim="adamw_torch_fused",
-        # bf16=True,  # Use BF16 if available
+        bf16=True,  # Use BF16 for flash attention
         # logging strategies
         logging_dir=f"{output_dir}/logs",
         logging_strategy="steps",
         logging_steps=10,
         save_strategy="no",
         **{k:v for k,v in config.items() if k != 'lora_config'}
-    )
+    ) # TODO: move train arguments to config
 
 
     trainer = CustomTrainer(
