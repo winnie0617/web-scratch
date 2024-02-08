@@ -42,9 +42,10 @@ def main(cfg: DictConfig):
     # print(train_dataset[0]["answer"])
     
     # model = AutoModel.from_pretrained(cfg.model.model_name_or_path, load_in_8bit=True, device_map="auto", use_cache=False) # TODO: hard coded
-    model = AutoModelForCausalLM.from_pretrained(cfg.model.model_name_or_path, load_in_8bit=True, device_map="auto", use_cache=False) # TODO: hard coded
+    model = AutoModelForCausalLM.from_pretrained(cfg.model.model_name_or_path, torch_dtype=torch.bfloat16, device_map="auto", use_cache=False) # TODO: hard coded
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_name_or_path)
-    
+    tokenizer.pad_token = tokenizer.eos_token # should be ok for casual LM
+
     # add new token
     # TODO: check again if this works properly after the code change
     tokenizer.add_tokens(["[ACT]"])
