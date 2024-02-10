@@ -31,7 +31,10 @@ def main(cfg: DictConfig):
         convert_to_qa_format,
         batched=False,
         remove_columns=list(cols_to_remove)
-    ).rename_column("cleaned_html", "context").select(range(10)) # TODO: only using 10 samples for testing
+    ).rename_column("cleaned_html", "context")
+    
+    train_dataset = train_dataset.filter(lambda x: len(x["context"]) < 50000) # TODO: only for testing purpose
+    #.select(range(500))
     
     # for i in range(10):
     #     print(train_dataset[i]["answer"]["answer_start"])
@@ -83,11 +86,11 @@ def main(cfg: DictConfig):
         target_modules = "all-linear"
     )
 
-    # prepare int-8 model for training
-    model = prepare_model_for_int8_training(model)
+    # Dont int8 training
+    # model = prepare_model_for_int8_training(model)
+    model.enable_input_require_grads()
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
-
 
     # Set up the trainer
     config = {
@@ -106,13 +109,13 @@ def main(cfg: DictConfig):
             Compute triplet loss
             """
             # TODO: limit token length for now
-            model_output = model(inputs["input_ids"], inputs["attention_mask"], output_hidden_states=True)
-            hidden_states = model_output.hidden_states[0] # model_output.hidden_states is a tuple
-            # shape is [batch_size, seq_len, hidden_dim]
-            # print(hidden_states.shape)
+            hidden_states = model(inputs["input_ids"], inputs["attention_mask"], output_hidden_states=True).hidden_states[0] # model_output.hidden_states is a tuple
+            # print("Input length", inputs["input_ids"].shape)
+            # print(torch.cuda.memory_summary())
             act = hidden_states[:,-1,:]
             pos = hidden_states[:,inputs["labels"][0][0],:] # TODO: right now only using the first positive candidate and only works for batch size 1
             loss = (act @ pos.T).flatten()[0] # TODO: fix this, only works for batch size 1
+
             return loss
     
     training_args = TrainingArguments(
