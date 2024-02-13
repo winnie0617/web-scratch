@@ -27,15 +27,15 @@ def main(cfg: DictConfig):
     cols_to_remove = set(train_dataset.column_names)
     # keep clean_html
     cols_to_remove.remove("cleaned_html")
+    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 50000) # TODO: only for testing purpose
     train_dataset = train_dataset.map(
         convert_to_qa_format,
         batched=False,
         remove_columns=list(cols_to_remove)
     ).rename_column("cleaned_html", "context")
     
-    train_dataset = train_dataset.filter(lambda x: len(x["context"]) < 50000) # TODO: only for testing purpose
-    #.select(range(500))
-    
+    # train_dataset = train_dataset.select(range(50))
+
     # for i in range(10):
     #     print(train_dataset[i]["answer"]["answer_start"])
     #     start, end = train_dataset[i]["answer"]["answer_start"][0], train_dataset[i]["answer"]["answer_end"][0]
@@ -69,6 +69,12 @@ def main(cfg: DictConfig):
     batched=False,
     remove_columns=train_dataset.column_names,
     )
+    
+    # Calculate input length for each example
+    input_lengths = []
+    for example in train_dataset:
+        input_lengths.append(len(example["input_ids"]))
+    
     train_dataset.set_format("pt", columns=["input_ids", "attention_mask"], output_all_columns=True)
     logger.info(f"Use device {'gpu' if torch.cuda.is_available() else 'cpu'}")
     logger.info(f"Use batch size {cfg.train.batch_size}")
@@ -90,7 +96,13 @@ def main(cfg: DictConfig):
     # model = prepare_model_for_int8_training(model)
     model.enable_input_require_grads()
     model = get_peft_model(model, lora_config)
+    model.model.model.embed_tokens.weight.requires_grad = True
     model.print_trainable_parameters()
+    
+    # print all parameters that require grad
+    # for name, param in model.named_parameters():
+    #     if param.requires_grad:
+    #         print(name)
 
     # Set up the trainer
     config = {
@@ -105,19 +117,32 @@ def main(cfg: DictConfig):
     class CustomTrainer(Trainer):
         
         def compute_loss(self, model, inputs, return_outputs=False):
-            """
-            Compute triplet loss
-            """
-            # TODO: limit token length for now
+
+            # print(inputs["input_ids"][0][-1])
+            # print(model.model.model.embed_tokens.weight[-1,:10])
             hidden_states = model(inputs["input_ids"], inputs["attention_mask"], output_hidden_states=True).hidden_states[0] # model_output.hidden_states is a tuple
             # print("Input length", inputs["input_ids"].shape)
             # print(torch.cuda.memory_summary())
-            act = hidden_states[:,-1,:]
-            pos = hidden_states[:,inputs["labels"][0][0],:] # TODO: right now only using the first positive candidate and only works for batch size 1
-            loss = (act @ pos.T).flatten()[0] # TODO: fix this, only works for batch size 1
+            # act = hidden_states[:,-1,:]
+            # pos = hidden_states[:,inputs["labels"][0]["pos_candidates"][0],:] # TODO: right now only using the first positive candidate and only works for batch size 1
+            # compute cosine simularity between last token and every token before
+
+            sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-1,:], hidden_states[:,-1,:], dim=2)
+            # TODO: add temperature?
+            loss = torch.nn.functional.cross_entropy(sim, inputs["labels"])
 
             return loss
     
+    def custom_collate(data):
+        inputs = torch.stack([d['input_ids'] for d in data])
+        attention_mask = torch.stack([d['attention_mask'] for d in data])
+        labels = torch.tensor([d['label']["pos_candidates"][0] for d in data]) # todo: only uses first positive
+        return { 
+            'input_ids': inputs,
+            'attention_mask': attention_mask,
+            'labels': labels
+        }
+
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
@@ -139,6 +164,7 @@ def main(cfg: DictConfig):
         train_dataset=train_dataset,
         # eval_dataset=validation_dataset,
         tokenizer=tokenizer,
+        data_collator=custom_collate,
     )
 
     trainer.train()

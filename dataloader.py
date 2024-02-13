@@ -56,7 +56,7 @@ def get_data_split(data_dir, split_file, is_train=False):
             "action_uid": [],
             "operation": [],
             "pos_candidates": [],
-            # "neg_candidates": [], # Don't need neg_candidates in this case
+            "neg_candidates": [], # Don't need neg_candidates in this case
             "cleaned_html": [],
         }
         num_actions = [len(actions) for actions in samples["actions"]]
@@ -71,7 +71,7 @@ def get_data_split(data_dir, split_file, is_train=False):
                     "action_uid",
                     "operation",
                     "pos_candidates",
-                    # "neg_candidates", # Don't need neg_candidates in this case
+                    "neg_candidates", # Don't need neg_candidates in this case
                     "cleaned_html",
                 ]:
                     outputs[key].append(action[key])
@@ -97,15 +97,15 @@ def get_data_split(data_dir, split_file, is_train=False):
                 )
             )
         sample["pos_candidates"] = positive
-        # negative = []
-        # for candidate in sample["neg_candidates"]:
-        #     negative.append(
-        #         (
-        #             candidate["backend_node_id"],
-        #             format_candidate(dom_tree, candidate, keep_html_brackets=False),
-        #         )
-        #     )
-        # sample["neg_candidates"] = negative
+        negative = []
+        for candidate in sample["neg_candidates"]:
+            negative.append(
+                (
+                    candidate["backend_node_id"],
+                    format_candidate(dom_tree, candidate, keep_html_brackets=False),
+                )
+            )
+        sample["neg_candidates"] = negative
         return sample
 
     # flatten_dataset = flatten_dataset.map(
@@ -175,53 +175,56 @@ def convert_to_qa_format(example):
     """ 
     Obtain the start and end char of the answer 
     Add columns "question", "context", "answer",
-    Where answer is {"answer_start": idx, "answer_end": idx}
+    Where answer is {"pos_candidates": idx, "neg_candidates": idx}
     """
     # dom_tree = lxml.etree.fromstring(example["cleaned_html"])
     #TODO: might be possible to have more than one pos candidate
-    answer_start_idxs = []
-    answer_end_idxs = []
-    for pos_candidate in example["pos_candidates"]:
-        pos_candidate_id = pos_candidate["backend_node_id"]
-        id_attr = f'backend_node_id="{pos_candidate_id}"'
-        idx = example["cleaned_html"].find(id_attr) # position of the 'b'
-        element_end = idx - 2
-        # open_bracket = element_end
-        # while open_bracket >= 0 and example["cleaned_html"][open_bracket] != "<":
-        #     open_bracket -= 1
-        # element = example["cleaned_html"][open_bracket+1 : element_end+1] # eg li, a
-        element = pos_candidate["tag"]
-        
-        # answer_start_idxs.append(open_bracket)
-        # search for end of the tag
-        close_bracket = element_end
-        while close_bracket < len(example["cleaned_html"]) and example["cleaned_html"][close_bracket] != ">":
-            close_bracket += 1
+    # answer_start_idxs = []
+    answer_end_idxs = {"pos_candidates":[], "neg_candidates": []}
+    # obtain indices for both positive and negative candidates
+    for label in ["pos_candidates", "neg_candidates"]:
+        for candidate in example[label]:
+            pos_candidate_id = candidate["backend_node_id"]
+            id_attr = f'backend_node_id="{pos_candidate_id}"'
+            idx = example["cleaned_html"].find(id_attr) # position of the 'b'
+            element_end = idx - 2
+            # open_bracket = element_end
+            # while open_bracket >= 0 and example["cleaned_html"][open_bracket] != "<":
+            #     open_bracket -= 1
+            # element = example["cleaned_html"][open_bracket+1 : element_end+1] # eg li, a
+            element = candidate["tag"]
             
-        # if "/" appears before ">", then no closing tag
-        if example["cleaned_html"][close_bracket-1] == "/":
-            answer_end_idxs.append(close_bracket)
-        else:
-            # scan until matching closing tag is found
-            i = close_bracket
-            counts = 1
-            # TODO: handle out of index
-            while i < len(example["cleaned_html"]) and counts > 0:
-                if example["cleaned_html"][i] == "<":
-                    if example["cleaned_html"][i+1] == "/" and example["cleaned_html"][i+2: i+2+len(element)] == element:
-                        counts -= 1
-                        i += len(element)
-                        
-                    elif example["cleaned_html"][i+1: i+1+len(element)] == element:
-                        counts += 1
-                        i += len(element)
-                i += 1
-            # print(example["cleaned_html"][element_end-len(element): i+2])
-            # print("========")
-            # i+1 is the position of the closing bracket
-            if i == len(example["cleaned_html"]):
-                print(i, pos_candidate, close_bracket)
-            answer_end_idxs.append(i+1)
+            # answer_start_idxs.append(open_bracket)
+            # search for end of the tag
+            close_bracket = element_end
+            while close_bracket < len(example["cleaned_html"]) and example["cleaned_html"][close_bracket] != ">":
+                close_bracket += 1
+                
+            # if "/" appears before ">", then no closing tag
+            if example["cleaned_html"][close_bracket-1] == "/":
+                answer_end_idxs[label].append(close_bracket)
+            else:
+                # scan until matching closing tag is found
+                i = close_bracket
+                counts = 1
+                # TODO: handle out of index
+                while i < len(example["cleaned_html"]) and counts > 0:
+                    if example["cleaned_html"][i] == "<":
+                        if example["cleaned_html"][i+1] == "/" and example["cleaned_html"][i+2: i+2+len(element)] == element:
+                            counts -= 1
+                            i += len(element)
+                            
+                        elif example["cleaned_html"][i+1: i+1+len(element)] == element:
+                            counts += 1
+                            i += len(element)
+                    i += 1
+                # print(example["cleaned_html"][element_end-len(element): i+2])
+                # print("========")
+                # i+1 is the position of the closing bracket
+                # TODO: deal with these cases
+                if i == len(example["cleaned_html"]):
+                    print(i, candidate, close_bracket)
+                answer_end_idxs[label].append(i+1)
 
     # # NOTE: Don't prune, just include the whole webpage
     seq_input = (
@@ -253,9 +256,10 @@ def convert_to_qa_format(example):
     #     if current_action_op != "CLICK":
     #         seq_target += f"Value: {current_action_value}"
     example["question"] = seq_input
-    example["answers"] = {"answer_start": answer_start_idxs, "answer_end": answer_end_idxs}
+    example["answers"] = answer_end_idxs
     # example["context"] = example["cleaned_html"]
     return example
+
 
 def preprocess_training_examples(examples, tokenizer, max_context_len):
     """
@@ -274,15 +278,16 @@ def preprocess_training_examples(examples, tokenizer, max_context_len):
     # determine the start and end positions of the answer
     
     # offset_mapping[i]: a tuple indicating the token i’s start position and end position of the span of characters inside the original context
-    end_positions = []
+    end_positions = {"pos_candidates":[], "neg_candidates": []}
     offset_mapping = inputs.pop("offset_mapping")
-    for char_idx in examples["answers"]["answer_end"]:
-        idx = len(offset_mapping) - 1
-        while idx >= 0 and offset_mapping[idx][1] >= char_idx:
-            idx -= 1
-        end_positions.append(idx + 2)
-        # print(char_idx, offset_mapping[idx + 2])
-        # print(examples["context"][char_idx], inputs["input_ids"][idx + 2])
+    for label in ["pos_candidates", "neg_candidates"]:
+        for char_idx in examples["answers"][label]:
+            idx = len(offset_mapping) - 1
+            while idx >= 0 and offset_mapping[idx][1] >= char_idx:
+                idx -= 1
+            end_positions[label].append(idx + 2)
+            # print(char_idx, offset_mapping[idx + 2])
+            # print(examples["context"][char_idx], inputs["input_ids"][idx + 2])
 
     # # sample_map = inputs.pop("overflow_to_sample_mapping") #  Since one sample can give several features, it maps each feature to the example it originated from
     # answers = examples["answers"]
@@ -326,7 +331,7 @@ def preprocess_training_examples(examples, tokenizer, max_context_len):
     #         end_positions.append(idx + 1)
 
     # inputs["start_positions"] = start_positions
-    inputs["labels"] = end_positions
+    inputs["label"] = end_positions
     
     # Set end token to be the ">" of the starting tag
     return inputs
