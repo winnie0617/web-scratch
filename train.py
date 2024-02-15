@@ -6,6 +6,7 @@ import tqdm
 
 import hydra
 import torch
+import numpy as np
 from dataloader import get_data_split, convert_to_qa_format, preprocess_training_examples_with_tokenizer
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
@@ -27,7 +28,7 @@ def main(cfg: DictConfig):
     cols_to_remove = set(train_dataset.column_names)
     # keep clean_html
     cols_to_remove.remove("cleaned_html")
-    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 70000) # TODO: 70000
+    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 40000) # TODO: 70000
     train_dataset = train_dataset.map(
         convert_to_qa_format,
         batched=False,
@@ -70,15 +71,38 @@ def main(cfg: DictConfig):
     remove_columns=train_dataset.column_names,
     )
     
-    # Calculate input length for each example
-    input_lengths = []
-    for example in train_dataset:
-        input_lengths.append(len(example["input_ids"]))
+    # # Load in validation dataset
+    # validation_dataset = get_data_split(
+    #     cfg.data.data_path, cfg.data.test_split_files.test_task, is_train=True
+    # ) # TODO: only test_task right now
+    
+    # cols_to_remove = set(validation_dataset.column_names)
+    # # TODO: duplicate as train
+    # cols_to_remove.remove("cleaned_html")
+    # validation_dataset = validation_dataset.filter(lambda x: len(x["cleaned_html"]) < 70000) # TODO: 70000
+    # validation_dataset = validation_dataset.map(
+    #     convert_to_qa_format,
+    #     batched=False,
+    #     remove_columns=list(cols_to_remove)
+    # ).rename_column("cleaned_html", "context")
+    
+    # validation_dataset = validation_dataset.map(
+    #     preprocess_training_examples_with_tokenizer(tokenizer, model.config.max_position_embeddings),
+    #     # batched=True,
+    #     # batch_size=256,
+    #     batched=False,
+    #     remove_columns=validation_dataset.column_names,
+    #     )
     
     train_dataset.set_format("pt", columns=["input_ids", "attention_mask"], output_all_columns=True)
+    # split the train_dataset into train and validation
+    dataset = train_dataset.train_test_split(test_size=0.05) 
+    train_dataset, eval_dataset = dataset["train"], dataset["test"]
+    
     logger.info(f"Use device {'gpu' if torch.cuda.is_available() else 'cpu'}")
     logger.info(f"Use batch size {cfg.train.batch_size}")
     logger.info(f"Training data size {len(train_dataset)}")
+    logger.info(f"Eval data size {len(eval_dataset)}")
     
     # ==== start of new code
     
@@ -111,6 +135,8 @@ def main(cfg: DictConfig):
         'num_train_epochs': cfg.train.epoch,
         'gradient_accumulation_steps': cfg.train.gradient_accumulation_steps,
         'per_device_train_batch_size': cfg.train.batch_size,
+        'per_device_eval_batch_size': 1, # TODO
+        'eval_accumulation_steps': 5, # avoid OOM
         'gradient_checkpointing': True,
     }
     
@@ -129,10 +155,11 @@ def main(cfg: DictConfig):
             temperature = 1 # TODO: hard coded
             # sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-4,:], hidden_states[:,-1,:], dim=2)
             sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-1,:], hidden_states[:,-1,:], dim=2)
-            print(sim[:,inputs["labels"].cpu().numpy()])
-            print(sim.mean(axis=1))
+            # print(sim[:,inputs["labels"].cpu().numpy()])
+            # print(sim.mean(axis=1))
             loss = torch.nn.functional.cross_entropy(sim / temperature, inputs["labels"])
-
+            if return_outputs:
+                return loss, {"hidden_states": hidden_states}
             return loss
     
     def custom_collate(data):
@@ -144,13 +171,54 @@ def main(cfg: DictConfig):
             'attention_mask': attention_mask,
             'labels': labels
         }
+    
+    def compute_metrics(pred):
+        # print("pred", pred.predictions.shape, pred.predictions)
+        hidden_states = pred.predictions
+        labels = pred.label_ids
+        inputs = pred.inputs # get padding info from inputs
+        # find the first index where inputs is -100
+        idx = (inputs != -100).sum(axis=1) # if N tokens, then first -100 is at N
+        def cosine_similarity(x, y):
+            return (x @ y.T).flatten() / (np.linalg.norm(x, axis=1) * np.linalg.norm(y, axis=1))
+        accuracy = []
+        proportion_max = []
+        for i in range(len(inputs)):
+            h = torch.tensor(hidden_states[i,:idx[i],:]).to('cuda')
+            sim = torch.nn.functional.cosine_similarity(h[:-1,:], h[-1,:], dim=1)
+            # sim = cosine_similarity(h[:-1,:], h[-1:,:])
+            max_sim = sim.max()
+            # print("max sim vs target sim", max_sim, sim[labels[i]])
+            # show all indices where sim = max_sim
+            is_max = sim == max_sim
+            # print("num of max_sim", is_max.sum())
+            # print("label is max", is_max[labels[i]])
+            accuracy.append(is_max[labels[i]].to('cpu').numpy())
+            proportion_max.append((is_max.sum() / idx[i]).to('cpu').numpy())
+        # accuracy = accuracy_score(labels, preds)
+
+        # # Calculate precision, recall, and F1-score
+        # precision = precision_score(labels, preds, average='weighted')
+        # recall = recall_score(labels, preds, average='weighted')
+        # f1 = f1_score(labels, preds, average='weighted')
+    
+        return {
+            'accuracy': np.array(accuracy).mean(),
+            'proportion_max': np.array(proportion_max).mean(),
+            # 'precision': precision,
+            # 'recall': recall,
+            # 'f1': f1
+        }
 
     training_args = TrainingArguments(
         output_dir=output_dir,
         overwrite_output_dir=True,
-        evaluation_strategy="no",
         optim="adamw_torch_fused",
         bf16=True,  # Use BF16 for flash attention
+        # # evlaution
+        evaluation_strategy="steps",
+        eval_steps=5,
+        include_inputs_for_metrics=True,
         # logging strategies
         logging_dir=f"{output_dir}/logs",
         logging_strategy="steps",
@@ -164,7 +232,8 @@ def main(cfg: DictConfig):
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        # eval_dataset=validation_dataset,
+        eval_dataset=eval_dataset,
+        compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=custom_collate,
     )
