@@ -86,27 +86,27 @@ def get_data_split(data_dir, split_file, is_train=False):
         num_proc=4,
     )
 
-    def format_candidates(sample):
-        dom_tree = lxml.etree.fromstring(sample["cleaned_html"])
-        positive = []
-        for candidate in sample["pos_candidates"]:
-            positive.append(
-                (
-                    candidate["backend_node_id"],
-                    format_candidate(dom_tree, candidate, keep_html_brackets=False),
-                )
-            )
-        sample["pos_candidates"] = positive
-        negative = []
-        for candidate in sample["neg_candidates"]:
-            negative.append(
-                (
-                    candidate["backend_node_id"],
-                    format_candidate(dom_tree, candidate, keep_html_brackets=False),
-                )
-            )
-        sample["neg_candidates"] = negative
-        return sample
+    # def format_candidates(sample):
+    #     dom_tree = lxml.etree.fromstring(sample["cleaned_html"])
+    #     positive = []
+    #     for candidate in sample["pos_candidates"]:
+    #         positive.append(
+    #             (
+    #                 candidate["backend_node_id"],
+    #                 format_candidate(dom_tree, candidate, keep_html_brackets=False),
+    #             )
+    #         )
+    #     sample["pos_candidates"] = positive
+    #     negative = []
+    #     for candidate in sample["neg_candidates"]:
+    #         negative.append(
+    #             (
+    #                 candidate["backend_node_id"],
+    #                 format_candidate(dom_tree, candidate, keep_html_brackets=False),
+    #             )
+    #         )
+    #     sample["neg_candidates"] = negative
+    #     return sample
 
     # flatten_dataset = flatten_dataset.map(
     #     format_candidates,

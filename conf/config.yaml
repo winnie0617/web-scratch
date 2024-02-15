@@ -6,7 +6,7 @@ train:
   # neg_ratio: 5
   batch_size: 1
   learning_rate: 3e-5
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 8
   eval_batch_size: 300
   epoch: 1
   warmup_steps: 0.5

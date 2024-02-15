@@ -27,7 +27,7 @@ def main(cfg: DictConfig):
     cols_to_remove = set(train_dataset.column_names)
     # keep clean_html
     cols_to_remove.remove("cleaned_html")
-    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 50000) # TODO: only for testing purpose
+    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 70000) # TODO: 70000
     train_dataset = train_dataset.map(
         convert_to_qa_format,
         batched=False,
@@ -85,8 +85,8 @@ def main(cfg: DictConfig):
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM, # task type is not necessary, but this is needed to get the label
         inference_mode=False,
-        r=8,
-        lora_alpha=16, 
+        r=16,
+        lora_alpha=32, 
         lora_dropout=0.05,
         # target_modules = ["q_proj", "v_proj"]
         target_modules = "all-linear"
@@ -126,10 +126,12 @@ def main(cfg: DictConfig):
             # act = hidden_states[:,-1,:]
             # pos = hidden_states[:,inputs["labels"][0]["pos_candidates"][0],:] # TODO: right now only using the first positive candidate and only works for batch size 1
             # compute cosine simularity between last token and every token before
-
+            temperature = 1 # TODO: hard coded
+            # sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-4,:], hidden_states[:,-1,:], dim=2)
             sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-1,:], hidden_states[:,-1,:], dim=2)
-            # TODO: add temperature?
-            loss = torch.nn.functional.cross_entropy(sim, inputs["labels"])
+            print(sim[:,inputs["labels"].cpu().numpy()])
+            print(sim.mean(axis=1))
+            loss = torch.nn.functional.cross_entropy(sim / temperature, inputs["labels"])
 
             return loss
     
