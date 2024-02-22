@@ -28,7 +28,7 @@ def main(cfg: DictConfig):
     cols_to_remove = set(train_dataset.column_names)
     # keep clean_html
     cols_to_remove.remove("cleaned_html")
-    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 40000) # TODO: 70000
+    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 70000) # TODO: 70000
     train_dataset = train_dataset.map(
         convert_to_qa_format,
         batched=False,
@@ -45,7 +45,6 @@ def main(cfg: DictConfig):
     # print(train_dataset)
     # print(train_dataset[0]["answer"])
     
-    # model = AutoModel.from_pretrained(cfg.model.pretrained_model_name_or_path, load_in_8bit=True, device_map="auto", use_cache=False) # TODO: hard coded
     print(cfg.model)
     print("============")
     model = AutoModelForCausalLM.from_pretrained(**cfg.model, torch_dtype=torch.bfloat16) # TODO: hard coded
@@ -71,29 +70,6 @@ def main(cfg: DictConfig):
     remove_columns=train_dataset.column_names,
     )
     
-    # # Load in validation dataset
-    # validation_dataset = get_data_split(
-    #     cfg.data.data_path, cfg.data.test_split_files.test_task, is_train=True
-    # ) # TODO: only test_task right now
-    
-    # cols_to_remove = set(validation_dataset.column_names)
-    # # TODO: duplicate as train
-    # cols_to_remove.remove("cleaned_html")
-    # validation_dataset = validation_dataset.filter(lambda x: len(x["cleaned_html"]) < 70000) # TODO: 70000
-    # validation_dataset = validation_dataset.map(
-    #     convert_to_qa_format,
-    #     batched=False,
-    #     remove_columns=list(cols_to_remove)
-    # ).rename_column("cleaned_html", "context")
-    
-    # validation_dataset = validation_dataset.map(
-    #     preprocess_training_examples_with_tokenizer(tokenizer, model.config.max_position_embeddings),
-    #     # batched=True,
-    #     # batch_size=256,
-    #     batched=False,
-    #     remove_columns=validation_dataset.column_names,
-    #     )
-    
     train_dataset.set_format("pt", columns=["input_ids", "attention_mask"], output_all_columns=True)
     # split the train_dataset into train and validation
     dataset = train_dataset.train_test_split(test_size=0.05) 
@@ -116,17 +92,10 @@ def main(cfg: DictConfig):
         target_modules = "all-linear"
     )
 
-    # Dont int8 training
-    # model = prepare_model_for_int8_training(model)
     model.enable_input_require_grads()
     model = get_peft_model(model, lora_config)
     model.model.model.embed_tokens.weight.requires_grad = True
     model.print_trainable_parameters()
-    
-    # print all parameters that require grad
-    # for name, param in model.named_parameters():
-    #     if param.requires_grad:
-    #         print(name)
 
     # Set up the trainer
     config = {
@@ -135,8 +104,8 @@ def main(cfg: DictConfig):
         'num_train_epochs': cfg.train.epoch,
         'gradient_accumulation_steps': cfg.train.gradient_accumulation_steps,
         'per_device_train_batch_size': cfg.train.batch_size,
-        'per_device_eval_batch_size': 1, # TODO
-        'eval_accumulation_steps': 5, # avoid OOM
+        'per_device_eval_batch_size': cfg.train.eval_batch_size,
+        'eval_accumulation_steps': 8, # avoid OOM
         'gradient_checkpointing': True,
     }
     
@@ -144,22 +113,32 @@ def main(cfg: DictConfig):
         
         def compute_loss(self, model, inputs, return_outputs=False):
 
-            # print(inputs["input_ids"][0][-1])
             # print(model.model.model.embed_tokens.weight[-1,:10])
-            hidden_states = model(inputs["input_ids"], inputs["attention_mask"], output_hidden_states=True).hidden_states[0] # model_output.hidden_states is a tuple
-            # print("Input length", inputs["input_ids"].shape)
-            # print(torch.cuda.memory_summary())
+            hidden_states = model(inputs["input_ids"], inputs["attention_mask"], output_hidden_states=True).hidden_states[-1]
             # act = hidden_states[:,-1,:]
             # pos = hidden_states[:,inputs["labels"][0]["pos_candidates"][0],:] # TODO: right now only using the first positive candidate and only works for batch size 1
             # compute cosine simularity between last token and every token before
-            temperature = 1 # TODO: hard coded
-            # sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-4,:], hidden_states[:,-1,:], dim=2)
-            sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-1,:], hidden_states[:,-1,:], dim=2)
-            # print(sim[:,inputs["labels"].cpu().numpy()])
-            # print(sim.mean(axis=1))
-            loss = torch.nn.functional.cross_entropy(sim / temperature, inputs["labels"])
+            temperature = 0.1 # TODO: hard coded
+            # sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-4,:], hidden_states[:,-4,:], dim=2)
+            sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-1,:], hidden_states[:,-1:,:], dim=2)
+            target_idx = inputs["labels"]
+            
+            # # get indices where input id is 28767 (">") or 2720 ("/>")
+            # is_close = (inputs["input_ids"] == 28767) + (inputs["input_ids"] == 2720)
+            # idxs = is_close.nonzero() - 1 # to get index before
+            # # print(hidden_states[:,idxs[:,1][:5],:10])
+            # sim = torch.nn.functional.cosine_similarity(hidden_states[:,idxs[:,1],:], hidden_states[:,-1,:], dim=2)
+            # # map label to corresponding index in the subset of hidden_states
+            # target_idx = is_close[:,:inputs["labels"]].sum(dim=1)
+
+            loss = torch.nn.functional.cross_entropy(sim / temperature, target_idx)
+
             if return_outputs:
-                return loss, {"hidden_states": hidden_states}
+                # instead of returning all hidden_states which would be too much memory,
+                # return the similarity scores as "logits"
+                # but different than sim because sin only calculates for 
+                # scores = torch.nn.functional.cosine_similarity(hidden_states[:,:-1,:], hidden_states[:,-1:,:], dim=2)
+                return loss, {"similarity": sim}
             return loss
     
     def custom_collate(data):
@@ -171,43 +150,26 @@ def main(cfg: DictConfig):
             'attention_mask': attention_mask,
             'labels': labels
         }
-    
+
     def compute_metrics(pred):
         # print("pred", pred.predictions.shape, pred.predictions)
-        hidden_states = pred.predictions
-        labels = pred.label_ids
-        inputs = pred.inputs # get padding info from inputs
         # find the first index where inputs is -100
-        idx = (inputs != -100).sum(axis=1) # if N tokens, then first -100 is at N
-        def cosine_similarity(x, y):
-            return (x @ y.T).flatten() / (np.linalg.norm(x, axis=1) * np.linalg.norm(y, axis=1))
+        idx = (pred.inputs != -100).sum(axis=1) # if N tokens, then first -100 is at N
         accuracy = []
-        proportion_max = []
-        for i in range(len(inputs)):
-            h = torch.tensor(hidden_states[i,:idx[i],:]).to('cuda')
-            sim = torch.nn.functional.cosine_similarity(h[:-1,:], h[-1,:], dim=1)
-            # sim = cosine_similarity(h[:-1,:], h[-1:,:])
+        number_max = []
+        # Need to use a for loop because sequence length is different for each input
+        for i in range(len(pred.inputs)):
+            sim = pred.predictions[i,:idx[i]]
             max_sim = sim.max()
-            # print("max sim vs target sim", max_sim, sim[labels[i]])
-            # show all indices where sim = max_sim
             is_max = sim == max_sim
-            # print("num of max_sim", is_max.sum())
-            # print("label is max", is_max[labels[i]])
-            accuracy.append(is_max[labels[i]].to('cpu').numpy())
-            proportion_max.append((is_max.sum() / idx[i]).to('cpu').numpy())
-        # accuracy = accuracy_score(labels, preds)
 
-        # # Calculate precision, recall, and F1-score
-        # precision = precision_score(labels, preds, average='weighted')
-        # recall = recall_score(labels, preds, average='weighted')
-        # f1 = f1_score(labels, preds, average='weighted')
+            accuracy.append(is_max[pred.label_ids[i]])
+            number_max.append(is_max.sum())
+
     
         return {
             'accuracy': np.array(accuracy).mean(),
-            'proportion_max': np.array(proportion_max).mean(),
-            # 'precision': precision,
-            # 'recall': recall,
-            # 'f1': f1
+            'number_max': np.array(number_max).mean(),
         }
 
     training_args = TrainingArguments(
@@ -215,9 +177,9 @@ def main(cfg: DictConfig):
         overwrite_output_dir=True,
         optim="adamw_torch_fused",
         bf16=True,  # Use BF16 for flash attention
-        # # evlaution
+        # evlaution
         evaluation_strategy="steps",
-        eval_steps=5,
+        eval_steps=20,
         include_inputs_for_metrics=True,
         # logging strategies
         logging_dir=f"{output_dir}/logs",
@@ -239,14 +201,6 @@ def main(cfg: DictConfig):
     )
 
     trainer.train()
-
-    # predictions, _, _ = trainer.predict(validation_dataset)
-    # start_logits, end_logits = predictions
-    # print(
-    #     compute_metrics(
-    #         start_logits, end_logits, validation_dataset, raw_datasets["validation"]
-    #     )
-    # )
 
 if __name__ == "__main__":
     main()

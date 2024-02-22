@@ -216,7 +216,13 @@ def convert_to_qa_format(example):
                             
                         elif example["cleaned_html"][i+1: i+1+len(element)] == element:
                             counts += 1
-                            i += len(element)
+                            # Need to search till the ">" to make sure it is not self closing
+                            j = i
+                            while j < len(example["cleaned_html"]) and example["cleaned_html"][j] != ">":
+                                j += 1
+                            if example["cleaned_html"][j-1] == "/":
+                                counts -= 1
+                            i = j + 1
                     i += 1
                 # print(example["cleaned_html"][element_end-len(element): i+2])
                 # print("========")
@@ -282,12 +288,15 @@ def preprocess_training_examples(examples, tokenizer, max_context_len):
     offset_mapping = inputs.pop("offset_mapping")
     for label in ["pos_candidates", "neg_candidates"]:
         for char_idx in examples["answers"][label]:
-            idx = len(offset_mapping) - 1
-            while idx >= 0 and offset_mapping[idx][1] >= char_idx:
+            idx = 0
+            while idx < len(offset_mapping) and offset_mapping[idx][0] < char_idx:
+                idx += 1
+            # "/>" could potentially occur, which is one single token
+            if inputs["input_ids"][idx-1] == 2720: # TODO: better way to not hardcode?
                 idx -= 1
-            end_positions[label].append(idx + 2)
-            # print(char_idx, offset_mapping[idx + 2])
-            # print(examples["context"][char_idx], inputs["input_ids"][idx + 2])
+            end_positions[label].append(idx)
+            # print(char_idx, offset_mapping[idx-1], offset_mapping[idx])
+            # print(examples["context"][char_idx-1:char_idx+1], inputs["input_ids"][idx])
 
     # # sample_map = inputs.pop("overflow_to_sample_mapping") #  Since one sample can give several features, it maps each feature to the example it originated from
     # answers = examples["answers"]
