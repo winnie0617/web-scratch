@@ -106,8 +106,8 @@ def main(cfg: DictConfig):
         'num_train_epochs': cfg.train.epoch,
         'gradient_accumulation_steps': cfg.train.gradient_accumulation_steps,
         'per_device_train_batch_size': cfg.train.batch_size,
-        'per_device_eval_batch_size': cfg.train.eval_batch_size,
-        'eval_accumulation_steps': 8, # avoid OOM
+        'per_device_eval_batch_size': cfg.eval.eval_batch_size,
+        'eval_accumulation_steps': cfg.eval.eval_accumulation_steps,
         'gradient_checkpointing': True,
     }
     
@@ -181,7 +181,7 @@ def main(cfg: DictConfig):
         bf16=True,  # Use BF16 for flash attention
         # evlaution
         evaluation_strategy="steps",
-        eval_steps=20,
+        eval_steps=cfg.eval.eval_steps,
         include_inputs_for_metrics=True,
         # logging strategies
         logging_dir=f"{output_dir}/logs",

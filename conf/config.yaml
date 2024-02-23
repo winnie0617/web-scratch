@@ -7,10 +7,14 @@ train:
   batch_size: 1
   learning_rate: 3e-5
   gradient_accumulation_steps: 8
-  eval_batch_size: 1
   epoch: 1
   warmup_steps: 0.5
   use_amp: True
+
+eval:
+  eval_batch_size: 1
+  eval_accumulation_steps: 8 # avoid OOM
+  eval_steps: 20
 
 seed: 123
 
