@@ -13,6 +13,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from transformers import TrainingArguments, Trainer, AutoModelForCausalLM, AutoTokenizer, AutoModel
 from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_int8_training
+from transformers import set_seed
 
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
+    set_seed(cfg.seed)
     logger.info(f"Use model {cfg.model.pretrained_model_name_or_path}")
     output_dir = HydraConfig.get().runtime.output_dir
     train_dataset = get_data_split(
@@ -28,7 +30,7 @@ def main(cfg: DictConfig):
     cols_to_remove = set(train_dataset.column_names)
     # keep clean_html
     cols_to_remove.remove("cleaned_html")
-    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 70000) # TODO: 70000
+    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 50000) # TODO: 70000
     train_dataset = train_dataset.map(
         convert_to_qa_format,
         batched=False,
@@ -53,14 +55,14 @@ def main(cfg: DictConfig):
 
     # add new token
     # TODO: check again if this works properly after the code change
-    tokenizer.add_tokens(["[ACT]"])
-    model.resize_token_embeddings(len(tokenizer))
-    params = model.state_dict()
-    embeddings = params['model.embed_tokens.weight']
-    pre_expansion_embeddings = embeddings[:-1,:]
-    mu = torch.mean(pre_expansion_embeddings, dim=0)
-    params['model.embed_tokens.weight'][-1,:] = mu
-    model.load_state_dict(params)
+    # tokenizer.add_tokens(["[ACT]"])
+    # model.resize_token_embeddings(len(tokenizer))
+    # params = model.state_dict()
+    # embeddings = params['model.embed_tokens.weight']
+    # pre_expansion_embeddings = embeddings[:-1,:]
+    # mu = torch.mean(pre_expansion_embeddings, dim=0)
+    # params['model.embed_tokens.weight'][-1,:] = mu
+    # model.load_state_dict(params)
     
     train_dataset = train_dataset.map(
     preprocess_training_examples_with_tokenizer(tokenizer, model.config.max_position_embeddings),
@@ -94,7 +96,7 @@ def main(cfg: DictConfig):
 
     model.enable_input_require_grads()
     model = get_peft_model(model, lora_config)
-    model.model.model.embed_tokens.weight.requires_grad = True
+    # model.model.model.embed_tokens.weight.requires_grad = True
     model.print_trainable_parameters()
 
     # Set up the trainer
@@ -119,8 +121,8 @@ def main(cfg: DictConfig):
             # pos = hidden_states[:,inputs["labels"][0]["pos_candidates"][0],:] # TODO: right now only using the first positive candidate and only works for batch size 1
             # compute cosine simularity between last token and every token before
             temperature = 0.1 # TODO: hard coded
-            # sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-4,:], hidden_states[:,-4,:], dim=2)
-            sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-1,:], hidden_states[:,-1:,:], dim=2)
+            sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-3,:], hidden_states[:,-1:,:], dim=2) # Last 3 tokens are "[", "ACT", "]"
+            # sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-1,:], hidden_states[:,-1:,:], dim=2)
             target_idx = inputs["labels"]
             
             # # get indices where input id is 28767 (">") or 2720 ("/>")
