@@ -30,7 +30,7 @@ def main(cfg: DictConfig):
     cols_to_remove = set(train_dataset.column_names)
     # keep clean_html
     cols_to_remove.remove("cleaned_html")
-    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 50000) # TODO: 70000
+    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 70000) # TODO: 70000
     train_dataset = train_dataset.map(
         convert_to_qa_format,
         batched=False,
@@ -74,7 +74,7 @@ def main(cfg: DictConfig):
     
     train_dataset.set_format("pt", columns=["input_ids", "attention_mask"], output_all_columns=True)
     # split the train_dataset into train and validation
-    dataset = train_dataset.train_test_split(test_size=0.05) 
+    dataset = train_dataset.train_test_split(test_size=0.1) 
     train_dataset, eval_dataset = dataset["train"], dataset["test"]
     
     logger.info(f"Use device {'gpu' if torch.cuda.is_available() else 'cpu'}")

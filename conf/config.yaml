@@ -13,7 +13,7 @@ train:
 
 eval:
   eval_batch_size: 1
-  eval_accumulation_steps: 8 # avoid OOM
+  eval_accumulation_steps: 32
   eval_steps: 20
 
 seed: 123
