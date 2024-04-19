@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import image_utils
 import numpy as np
+import time
+
 
 class MultimodalAgent(PreTrainedModel):
     def __init__(self, config, image_encoder, lm, patch_width, patch_height):
@@ -15,86 +17,131 @@ class MultimodalAgent(PreTrainedModel):
         self.patch_width = patch_width
         self.patch_height = patch_height
 
-    def forward(self, pixel_values, input_ids, attention_mask=None, labels=None):
+    def forward(self, flattened_patches, input_ids, attention_mask, attention_mask_image, labels=None):
         # embed pixel_values with image_encoder
-        # h_image = self.image_encoder(flattened_patches, attention_mask_image).last_hidden_state
-        h_image = self.image_encoder(pixel_values, interpolate_pos_encoding=True).last_hidden_state
+        h_image = self.image_encoder(flattened_patches, attention_mask_image).last_hidden_state
+        # h_image = self.image_encoder(pixel_values, interpolate_pos_encoding=True).last_hidden_state
         # linear layer to project hidden states to lm's input dimension
         h_image = self.projector(h_image)
-        # look up token embedding for text
-        h_text = self.lm.model.embed_tokens(input_ids)
-        # concatenate image represenation with question
-        inputs_embeds = torch.cat([h_image, h_text], dim=1)
-        # also concat attention mask
-        # attention_mask = torch.cat([torch.ones(h_image.shape), attention_mask], dim=-1)
-        # TODO: need to add some sort of separator, like \n?
-        return self.lm(inputs_embeds=inputs_embeds, output_hidden_states=True).hidden_states[-1] # Not passing attention mask, no need for now since batch size is 1
         
+        # # use attention mask to keep only positions where attention_mask is 1
+        # input_ids = input_ids[torch.where(attention_mask == 1)].unsqueeze(0)
+        # print(input_ids)
+        # look up token embedding for text
+        input_ids_text = input_ids[torch.where(attention_mask == 1)].unsqueeze(0)
+        input_ids_pads = input_ids[torch.where(attention_mask == 0)].unsqueeze(0)
+        h_text = self.lm.model.embed_tokens(input_ids_text)
+        h_pads = self.lm.model.embed_tokens(input_ids_pads)
+        # concatenate image represenation with question
+        inputs_embeds = torch.cat([h_pads, h_image, h_text], dim=1)
+        
+        # # also concat attention mask
+        attention_mask_modified = torch.cat([attention_mask[:,:input_ids.shape[1]], attention_mask_image, attention_mask[:,input_ids.shape[1]:]], dim=-1)
+        # TODO: need to add some sort of separator, like \n?
+        return self.lm(inputs_embeds=inputs_embeds, attention_mask=attention_mask_modified, output_hidden_states=True).hidden_states[-1] # Not passing attention mask, no need for now since batch size is 1        
 
 class MultimodalTrainer(Trainer):
     
+    
     def compute_loss(self, model, inputs, return_outputs=False):
         
-        # hidden_states = model(flattened_patches=inputs["flattened_patches"], attention_mask_image=inputs["attention_mask_image"], input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"])
-        hidden_states = model(pixel_values=inputs["pixel_values"], input_ids=inputs["input_ids"])
+        # with torch.autocast(device_type="cuda"):
+        device = model.device
+        hidden_states = model(flattened_patches=inputs["flattened_patches"], input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"], attention_mask_image=inputs["attention_mask_image"])
         # compute cosine simularity between last token and every token before
         temperature = 0.1 # TODO: hard coded
         # sim = torch.nn.functional.cosine_similarity(hidden_states[:,:-3,:], hidden_states[:,-1:,:], dim=2) # Last 3 tokens are "[", "ACT", "]"
-        num_cols = inputs["pixel_values"].shape[-1] // model.patch_width
-        num_rows = inputs["pixel_values"].shape[-2] // model.patch_height
+        
+        # num_cols = inputs["pixel_values"].shape[-1] // model.patch_width
+        num_rows, num_cols = inputs["row_col"][0]
         num_patches = num_cols * num_rows
-        sim = torch.nn.functional.cosine_similarity(hidden_states[:,1:num_patches+1,:], hidden_states[:,-1:,:], dim=2) # Last 3 tokens are "[", "ACT", "]"
-        pos_idxs = set()
-        
-        for box in inputs["labels"][0]: # TODO: only for batch size 
-            pos_idxs.update(image_utils.boxes_to_patch_idx(box, num_cols, model.patch_width, model.patch_height))
-        # +1 because first idx is CLS
-        # target_idx = torch.tensor([idx + 1 for idx in pos_idxs]).to(device)
-        
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # TODO: Move
+        max_patches = inputs["attention_mask_image"].shape[-1]
+        text_len = inputs["attention_mask"].sum()
 
-        target_idx = torch.tensor(list(pos_idxs)).to(device)
-
-        if target_idx >= num_patches: # TODO: seems like some samples have bounding box that is out of range
+        # max_patch = inputs["attention_mask_image"]
+        
+        # TODO: I believe no CLS token, but double check
+        sim = torch.nn.functional.cosine_similarity(hidden_states[:,-(text_len+max_patches):-(text_len+max_patches-num_patches),:], hidden_states[:,-1:,:], dim=2) # Last 3 tokens are "[", "ACT", "]"
+        # sim = torch.nn.functional.cosine_similarity(hidden_states[:,1:num_patches+1,:], hidden_states[:,-1:,:], dim=2) # Last 3 tokens are "[", "ACT", "]"
+        
+        # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # TODO: Move
+        # get current cuda device
+        
+        model.gradient_as_bucket_view = True
+        
+        if isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            model = model.module
+        
+        target_idxs = []
+        for boxes in inputs["labels"]:
+            pos_idxs = set()
+            for box in boxes: # TODO: only for batch size 
+                pos_idxs.update(image_utils.boxes_to_patch_idx(box, num_cols, model.patch_width, model.patch_height))
+            target_idxs.append(list(pos_idxs)[0])
+        
+        target_idxs = torch.tensor(target_idxs).to(device)
+        
+        if (target_idxs >= num_patches).sum() > 0: # TODO: seems like some samples have bounding box that is out of range
             print("Bounding box out of range")
-            target_idx = torch.tensor([0]).to(device)
-            
-        # if return_outputs and target_idx.item() in list(range(0, max_patches, 8)):
-        #     print(tokenizer.decode(inputs["input_ids"][0]))
-        #     print("prediction", torch.argmax(sim).item(), "actual", target_idx.item())
-        #     image_utils.plot_image(inputs["pixel_values"], patch_width, patch_height, torch.argmax(sim).item(), target_idx.item())
+            target_idxs[torch.where(target_idxs >= num_patches)] = 0
+        
+        target_idx = target_idxs.item()
+        
+        if return_outputs and target_idx in list(range(0, num_patches, 37)):
+            # from transformers import AutoTokenizer
+            # tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+            # print(tokenizer.decode(inputs["input_ids"][0]))
+            import matplotlib.pyplot as plt
+            # print("prediction", torch.argmax(sim).item(), "actual", target_idx)
+            plt.imshow(sim.cpu().detach().numpy().reshape(num_rows, num_cols))
+            plt.colorbar()
+            # configure colormap theme
+            plt.set_cmap('gray')
+            # draw a circle at target_idx
+            plt.plot(target_idx % num_cols.item(), target_idx // num_cols.item(), 'go')
+            plt.plot(torch.argmax(sim).item() % num_cols.item(), torch.argmax(sim).item() // num_cols.item(), 'ro')
+            # plt.show()
+            plt.savefig(f'visualization/similarity/{target_idx}_{time.time()}.png')
+            plt.clf()
+            pixel_values = image_utils.flattened_patches_to_pixel_values(inputs["flattened_patches"][0], num_rows, num_cols, model.patch_width, model.patch_height)
+            image_utils.plot_image(pixel_values, model.patch_width, model.patch_height, torch.argmax(sim).item(), target_idx, save_name=target_idx)
+            plt.clf()
         
         # print("box", inputs["labels"][0])
         # print("click coordinate", patch_idx_to_click(target_idx, num_cols))
         # print("click box", patch_idx_to_patch_box(target_idx, num_cols))
 
-        loss = torch.nn.functional.cross_entropy(sim / temperature, target_idx) # TODO: use BCE for multitarget?
+        loss = torch.nn.functional.cross_entropy(sim / temperature, target_idxs) # TODO: use BCE for multitarget?
         # print(loss)
         
+        # plot heat map for sim
+
         # print(torch.max(sim), sim[0,target_idx])
         if return_outputs:
             # instead of returning all hidden_states which would be too much memory,
             # return the similarity scores as "logits"
             # but different than sim because sin only calculates for 
             # scores = torch.nn.functional.cosine_similarity(hidden_states[:,:-1,:], hidden_states[:,-1:,:], dim=2)
-            return loss, {"sim":sim, "target_idx":target_idx}
+            return loss, {"sim":sim, "target_idx":target_idxs}
         return loss
 
 
 def custom_collate(data):
     # flattened_patches = torch.stack([d['screenshot'] for d in data])
-    pixel_values = torch.stack([d['screenshot'] for d in data])
+    flattened_patches = torch.stack([d['screenshot'] for d in data])
     # input_ids = torch.stack([d['input_ids'] for d in data])
     input_ids = torch.tensor([d['input_ids'] for d in data]) # set_transform resets set_format :(
     attention_mask = torch.tensor([d['attention_mask'] for d in data])
-    # attention_mask_image = torch.stack([d['attention_mask_image'] for d in data])
+    attention_mask_image = torch.stack([d['attention_mask_image'] for d in data])
     labels = torch.tensor([d['labels'] for d in data]) # todo: only uses first positive
+    row_col = torch.tensor([d['row_col'] for d in data])
     return { 
-        'pixel_values': pixel_values,
+        'flattened_patches': flattened_patches,
         'input_ids': input_ids,
         'attention_mask': attention_mask,
-        # 'attention_mask_image': attention_mask_image,
+        'attention_mask_image': attention_mask_image,
         'labels': labels,
+        'row_col': row_col
     }
 
 def compute_metrics(pred):

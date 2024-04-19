@@ -111,7 +111,8 @@ def _tokenize_training_examples(examples, tokenizer):
     """
     Tokenize and map char index of the target to token index
     """
-    inputs = tokenizer(examples["question"] + " [ACT]", padding="max_length", truncation=True, max_length=256)
+    # inputs = tokenizer(examples["question"] + " [ACT]", padding="max_length", truncation=True, max_length=256)
+    inputs = tokenizer(examples["question"] + " [ACT]")
     inputs["labels"] = examples["boxes"]
 
     return inputs
