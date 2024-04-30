@@ -14,6 +14,7 @@ import multimodal
 from transformers import AutoModelForCausalLM, AutoModel, AutoConfig
 from transformers import Pix2StructForConditionalGeneration, Pix2StructVisionConfig
 
+checkpoint = None
 
 # DDP
 dist.init_process_group("nccl")
@@ -31,8 +32,8 @@ torch.cuda.set_device(device=device)
 from transformers import set_seed
 set_seed(123)
 num_examples = None
-patch_height, patch_width = 16, 16
-max_patches = 4000
+patch_height, patch_width = 32, 32
+max_patches = 1000
 image_encoder_path = "google/pix2struct-textcaps-base"
 lm_path = "mistralai/Mistral-7B-v0.1"
 torch.cuda.empty_cache()
@@ -109,6 +110,7 @@ tokenizer = AutoTokenizer.from_pretrained(lm_path)
 tokenizer.pad_token = tokenizer.eos_token # should be ok for casual LM
 processor = Pix2StructImageProcessor.from_pretrained(image_encoder_path) # TODO: define this somewhere else
 processor.max_patches = max_patches
+processor.patch_size = {"height": patch_height, "width": patch_width}
 
 cols = train_dataset.column_names
 cols.remove("screenshot")
@@ -127,7 +129,6 @@ logger.info(f"Use device {'gpu' if torch.cuda.is_available() else 'cpu'}")
 # logger.info(f"Use batch size {cfg.train.batch_size}")
 logger.info(f"Training data size {len(train_dataset)}")
 logger.info(f"Eval data size {len(eval_dataset)}")
-
 
 # ### Prepare Model
 
@@ -152,8 +153,8 @@ image_encoder.to(device)
 
 model = multimodal.MultimodalAgent(config, image_encoder, lm, patch_width, patch_height)
 model.to(device)
-print(f"Device: {device}:")
-print(torch.cuda.memory_allocated())
+# print(f"Device: {device}:")
+# print(torch.cuda.memory_allocated())
 
 # print("Layers and their dimensions:")
 # import torch.nn as nn
@@ -174,19 +175,31 @@ lora_config = LoraConfig(
     r=16,
     lora_alpha=32, 
     lora_dropout=0.05,
-    target_modules="all-linear",
+    target_modules=['k_proj', 'wo', 'gate_proj', 'query', 'projector', 'q_proj', 'wi_1', 'down_proj', 'v_proj', 'wi_0', 'o_proj', 'key', 
+'up_proj', 'output', 'value', 'patch_projection'], # exclude lm head
     modules_to_save=["projector"] # this layer is not pretrained
 )
 
 # model.lm.enable_input_require_grads()
 model = get_peft_model(model, lora_config)
+
+if checkpoint:
+    # from peft import PeftModel
+    # model = PeftModel.from_pretrained(model, checkpoint, config=lora_config)
+    
+    from peft import load_peft_weights, set_peft_model_state_dict
+    lora_weights = load_peft_weights(checkpoint)
+    set_peft_model_state_dict(model, lora_weights)
+
 model.print_trainable_parameters()
 # model = DDP(model, device_ids=[device_id])
 
+# print("With checkpoint")
 # for name, param in model.named_parameters():
 #     if param.requires_grad:
 #         print(name)
 
+# print(model.peft_config["default"].target_modules)
 
 # ### Set up Trainer
 
@@ -197,14 +210,15 @@ from transformers import TrainingArguments
 
 config = {
         'lora_config': lora_config,
-        'learning_rate': 3e-4,
-        'num_train_epochs': 3,
-        'gradient_accumulation_steps': 16,
+        'learning_rate': 5e-4,
+        'num_train_epochs': 30,
+        'gradient_accumulation_steps': 128 / world_size,
         'per_device_train_batch_size': 1,
         'per_device_eval_batch_size': 1,
         'eval_accumulation_steps': 32,
         'gradient_checkpointing': True,
-        'gradient_checkpointing_kwargs':{'use_reentrant':False} # To work with DDP
+        'gradient_checkpointing_kwargs':{'use_reentrant':False}, # To work with DDP
+        'ddp_find_unused_parameters': False
 }
 
 
@@ -212,7 +226,7 @@ config = {
 
 # In[10]:
 
-
+eval_save_step = 60
 training_args = TrainingArguments(
     output_dir="output",
     overwrite_output_dir=True,
@@ -221,15 +235,18 @@ training_args = TrainingArguments(
     # evlaution
     label_names=["labels"], # so that trainer will call compute_loss
     evaluation_strategy="steps",
-    eval_steps=20,
+    eval_steps=eval_save_step,
     include_inputs_for_metrics=True,
     log_level="info",
     # logging strategies
-    logging_dir=f"output/logs",
+    logging_dir="output/logs",
     logging_strategy="steps",
     logging_first_step=True,
-    logging_steps=5,
-    save_strategy="no",
+    logging_steps=20,
+    # save model strategies
+    save_strategy="steps",
+    save_steps=eval_save_step,
+    save_total_limit=1,
     remove_unused_columns=False,
     **{k:v for k,v in config.items() if k != 'lora_config'}
 ) # TODO: move train arguments to config
@@ -243,7 +260,10 @@ trainer = multimodal.MultimodalTrainer(
     data_collator=multimodal.custom_collate,
 )
 torch.cuda.empty_cache()
-trainer.train()
+if not checkpoint:
+    trainer.train()
+else:
+    trainer.train(resume_from_checkpoint=checkpoint)
 
 dist.destroy_process_group()
 

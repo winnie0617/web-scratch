@@ -1,10 +1,11 @@
 import json
 import math
 
-def get_previous_actions_original(dataset):
+def get_previous_actions(dataset):
     
     # Add column for previous_actions
     previous_actions = []
+    next_actions = []
     curr_actions = None
     num_actions = 0
     step = 0
@@ -14,32 +15,72 @@ def get_previous_actions_original(dataset):
             curr_actions = dataset[i]["action_reprs"]
             num_actions = len(curr_actions)
         previous_actions.append(curr_actions[:step]) 
+        next_actions.append(curr_actions[step])
         step += 1
 
     dataset = dataset.add_column("previous_actions", previous_actions)
+    dataset = dataset.add_column("next_action", next_actions)
     
     return dataset
 
-def get_previous_actions(dataset):
+# def get_previous_actions_current_only(dataset):
     
-    # Add column for previous_actions
-    previous_actions = []
-    curr_actions = None
-    num_actions = 0
-    step = 0
-    for i in range(len(dataset)):    
-        if step == num_actions:
-            step = 0
-            curr_actions = dataset[i]["action_reprs"]
-            num_actions = len(curr_actions)
-        previous_actions.append(curr_actions[step]) 
-        step += 1
+#     # Add column for previous_actions
+#     previous_actions = []
+#     curr_actions = None
+#     num_actions = 0
+#     step = 0
+#     for i in range(len(dataset)):    
+#         if step == num_actions:
+#             step = 0
+#             curr_actions = dataset[i]["action_reprs"]
+#             num_actions = len(curr_actions)
+#         previous_actions.append(curr_actions[step]) 
+#         step += 1
 
-    dataset = dataset.add_column("previous_actions", previous_actions)
+#     dataset = dataset.add_column("previous_actions", previous_actions)
     
-    return dataset
+#     return dataset
 
-def get_prompt_target_previous_action(example):
+# def get_prompt_target_previous_action(example):
+#     """
+#     Use the bounding boxes of pos_candidates (as list of lists, [left, bottom, width, height]
+#     """
+#     boxes = []
+#     for cand in example["pos_candidates"]:
+#         json_data = json.loads(cand)
+#         attributes = json.loads(json_data['attributes'])
+#         bounding_box_rect_str = attributes['bounding_box_rect']
+#         boxes.append(list(map(float, bounding_box_rect_str.split(','))))
+
+#     # NOTE: Don't prune, just include the whole webpage
+#     seq_input = (
+#         "Based on the webpage screenshot, try to complete the following task:\n"
+#         f"Task: {example['confirmed_task']}\n"
+#         f"Previous actions:\n"
+#     )
+#     # TODO: hard-coded
+#     previous_k = 5
+#     if len(example["previous_actions"]) > 0:
+#         for action in example["previous_actions"][-previous_k:]:
+#             seq_input += f"{action}\n"
+#     else:
+#         seq_input += "None\n"
+        
+#     seq_input += (
+#         "What should be the element to interact with next?"
+#     )
+
+#     example["question"] = seq_input
+#     example["boxes"] = boxes
+    
+#     # l, b, _, _, = example["boxes"][0] # TODO: only works for single target
+#     # width, height = example["screenshot"].size
+#     # example["valid"] = l < width and b < height
+
+#     return example
+
+def get_prompt_target(example):
     """
     Use the bounding boxes of pos_candidates (as list of lists, [left, bottom, width, height]
     """
@@ -63,36 +104,9 @@ def get_prompt_target_previous_action(example):
             seq_input += f"{action}\n"
     else:
         seq_input += "None\n"
-        
     seq_input += (
-        "What should be the element to interact with next?"
-    )
-
-    example["question"] = seq_input
-    example["boxes"] = boxes
-    
-    # l, b, _, _, = example["boxes"][0] # TODO: only works for single target
-    # width, height = example["screenshot"].size
-    # example["valid"] = l < width and b < height
-
-    return example
-
-def get_prompt_target(example):
-    """
-    Use the bounding boxes of pos_candidates (as list of lists, [left, bottom, width, height]
-    """
-    boxes = []
-    for cand in example["pos_candidates"]:
-        json_data = json.loads(cand)
-        attributes = json.loads(json_data['attributes'])
-        bounding_box_rect_str = attributes['bounding_box_rect']
-        boxes.append(list(map(float, bounding_box_rect_str.split(','))))
-
-    # NOTE: Don't prune, just include the whole webpage
-    seq_input = (
-        "Based on the webpage screenshot, try to complete the following task:\n"
-        f"Task: {example['confirmed_task']}\n"
-        f"Required actions:{example['previous_actions']}\n"
+        "Required action:\n"
+        f"{example['next_action']}\n"        
     )
     seq_input += (
         "What should be the element to interact with given the required action?"
@@ -137,6 +151,7 @@ def _preprocess_image(example, processor, max_patches, patch_height, patch_width
     # processor.size = {"height":resized_height, "width":resized_width}
     inputs = processor(images=example["screenshot"], return_tensors="pt")
     example["screenshot"] = inputs["flattened_patches"]
+    print(example["screenshot"].shape)
     # example["screenshot"] = inputs["pixel_values"]
     all_scaled_boxes = []
     x_scale = image_width / resized_width
@@ -152,8 +167,57 @@ def _preprocess_image(example, processor, max_patches, patch_height, patch_width
     return example
     # return {"pixel_values": processor(images=example["screenshot"], return_tensors="pt").pixel_values} #[1, 3, 224, 224]
     
-    
 def _preprocess_image_cropped(example, processor, max_patches, patch_height, patch_width):
+    """ 
+    Aspect ratio preserving, fixed size patches and fixed resolution, crop image instead
+    reference: https://github.com/huggingface/transformers/blob/main/src/transformers/models/pix2struct/image_processing_pix2struct.py
+    """
+    im = example["screenshot"][0]
+    image_width, image_height = im.size
+    scale = 1
+    # Divide the image horizontally, choose the slice that contains the element
+    # for patch_width x patch_height pixel patches, want <=max_patches while keeping original width
+    # first calculate number of columns, and find the max number of rows for each slice
+    num_cols = max(min(math.floor(scale * image_width / patch_width), max_patches), 1)
+    num_rows_per_slice = math.floor(max_patches / num_cols)
+
+    resized_height = max(int(image_height * scale // patch_height) * patch_height, 1)
+    resized_width = max(num_cols * patch_width, 1)
+    
+    all_scaled_boxes = []
+    x_scale = image_width / resized_width
+    y_scale = image_height / resized_height
+    
+    # first resize image
+    im = im.resize((resized_width, resized_height))
+    
+    # then find target row
+    for boxes in example["labels"]:
+        scaled_boxes = []
+        for box in boxes:
+            # Choose the slice that contains the box
+            row_idx = int(box[1]/y_scale / patch_height) # (px / (px/row)) = row
+            slice_idx = row_idx // num_rows_per_slice # (row / rows/slice) = slice
+            slice_start_pixel = slice_idx * num_rows_per_slice * patch_height # slice * rows/slice * px/row = px
+            
+            if slice_start_pixel >= image_height: # TODO: dont handle it here
+                # print("out of range - preprocessing")
+                slice_start_pixel = 0
+            scaled_boxes.append([box[0]/x_scale, box[1]/y_scale - slice_start_pixel, box[2]/x_scale, box[3]/y_scale]) # shift index to start at slice
+        all_scaled_boxes.append(scaled_boxes)
+    
+    # crop image to only select target row
+    im = im.crop((0, slice_start_pixel, resized_width, slice_start_pixel+num_rows_per_slice * patch_height))
+    
+    # Can finally process image
+    inputs = processor(images=im, return_tensors="pt")
+    example["screenshot"] = inputs["flattened_patches"]
+    example["labels"] = all_scaled_boxes
+    example["attention_mask_image"] = inputs["attention_mask"]
+    example["row_col"] = [[num_rows_per_slice, num_cols]]
+    return example
+    
+def _preprocess_image_cropped_vit(example, processor, max_patches, patch_height, patch_width):
     """ 
     Aspect ratio preserving, fixed size patches and fixed resolution, crop image instead
     reference: https://github.com/huggingface/transformers/blob/main/src/transformers/models/pix2struct/image_processing_pix2struct.py
