@@ -80,17 +80,25 @@ class MultimodalTrainer(Trainer):
             target_idxs.append(list(pos_idxs)[0])
         
         target_idxs = torch.tensor(target_idxs).to(device)
-        
         if (target_idxs >= num_patches).sum() > 0: # TODO: seems like some samples have bounding box that is out of range
-            print("Bounding box out of range")
-            target_idxs[torch.where(target_idxs >= num_patches)] = 0
+            for i, target_idx in enumerate(target_idxs):
+                if target_idx >= num_patches:
+                    uppermost = image_utils.boxes_to_patch_idx(box, num_cols, model.patch_width, model.patch_height, return_uppermost=True)[0]
+                    while uppermost + num_cols < num_patches:
+                        uppermost += num_cols
+                    target_idxs[i] = uppermost
+            if (target_idxs >= num_patches).sum() > 0:
+                # print("Bounding box out of range")
+                target_idxs[torch.where(target_idxs >= num_patches)] = 0
         
         target_idx = target_idxs.item()
         
-        if return_outputs and target_idx in list(range(0, num_patches, 37)):
-            # from transformers import AutoTokenizer
-            # tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
-            # print(tokenizer.decode(inputs["input_ids"][0]))
+        # if return_outputs and (target_idx == torch.argmax(sim).item() or target_idx in list(range(0, num_patches, 37))):
+        # if return_outputs:
+        if True:
+            from transformers import AutoTokenizer
+            tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-7B-v0.1")
+            print(tokenizer.decode(inputs["input_ids"][0]))
             import matplotlib.pyplot as plt
             # print("prediction", torch.argmax(sim).item(), "actual", target_idx)
             plt.imshow(sim.cpu().detach().numpy().reshape(num_rows, num_cols))
