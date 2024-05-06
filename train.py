@@ -7,7 +7,7 @@ import tqdm
 import hydra
 import torch
 import numpy as np
-from dataloader import get_data_split, convert_to_qa_format, preprocess_training_examples_with_tokenizer
+from dataloader import convert_to_qa_format, preprocess_training_examples_with_tokenizer
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
@@ -15,6 +15,8 @@ from transformers import TrainingArguments, Trainer, AutoModelForCausalLM, AutoT
 from peft import get_peft_model, LoraConfig, TaskType, prepare_model_for_int8_training
 from transformers import set_seed
 
+from datasets import load_dataset
+from dataloader import prune_html, get_previous_actions
 
 logger = logging.getLogger(__name__)
 
@@ -24,28 +26,32 @@ def main(cfg: DictConfig):
     set_seed(cfg.seed)
     logger.info(f"Use model {cfg.model.pretrained_model_name_or_path}")
     output_dir = HydraConfig.get().runtime.output_dir
-    train_dataset = get_data_split(
-        cfg.data.data_path, cfg.data.train_split_file, is_train=True
-    )
+    # train_dataset = get_data_split(
+    #     cfg.data.data_path, cfg.data.train_split_file, is_train=True
+    # )
+    
+
+    
+    train_dataset = load_dataset(cfg.data.data_path, split="train") # TODO: only use 1000 for now
     cols_to_remove = set(train_dataset.column_names)
-    # keep clean_html
-    cols_to_remove.remove("cleaned_html")
-    train_dataset = train_dataset.filter(lambda x: len(x["cleaned_html"]) < 70000) # TODO: 70000
+
+    train_dataset = train_dataset.map(prune_html, batched=False) #
+
+    train_dataset = get_previous_actions(train_dataset)
     train_dataset = train_dataset.map(
         convert_to_qa_format,
         batched=False,
         remove_columns=list(cols_to_remove)
-    ).rename_column("cleaned_html", "context")
-    
-    # train_dataset = train_dataset.select(range(50))
-
-    # for i in range(10):
-    #     print(train_dataset[i]["answer"]["answer_start"])
-    #     start, end = train_dataset[i]["answer"]["answer_start"][0], train_dataset[i]["answer"]["answer_end"][0]
-    #     print("indexed:", train_dataset[i]["context"][start:end])
-    #     print("actual:", train_dataset[i]["pos_candidates"][0])
-    # print(train_dataset)
-    # print(train_dataset[0]["answer"])
+    )
+    # filter data where answer is None
+    print("Before filtering for elements that cannot be located")
+    print(train_dataset)
+    train_dataset = train_dataset.filter(lambda x: x["answers"] != [])
+    print("After filtering")
+    print(train_dataset)
+    train_dataset = train_dataset.filter(lambda x: len(x["context"]) < 50000)
+    print("More filtering")
+    print(train_dataset)
     
     print(cfg.model)
     print("============")
@@ -65,16 +71,17 @@ def main(cfg: DictConfig):
     # model.load_state_dict(params)
     
     train_dataset = train_dataset.map(
-    preprocess_training_examples_with_tokenizer(tokenizer, model.config.max_position_embeddings),
-    # batched=True,
-    # batch_size=256,
-    batched=False,
-    remove_columns=train_dataset.column_names,
-    )
+        preprocess_training_examples_with_tokenizer(tokenizer, model.config.max_position_embeddings),
+        # batched=True,
+        # batch_size=256,
+        batched=False,
+        remove_columns=train_dataset.column_names,
+        )
     
     train_dataset.set_format("pt", columns=["input_ids", "attention_mask"], output_all_columns=True)
-    # split the train_dataset into train and validation
-    dataset = train_dataset.train_test_split(test_size=0.1) 
+    # # split the train_dataset into train and validation
+    dataset = train_dataset.train_test_split(test_size=0.05) 
+        
     train_dataset, eval_dataset = dataset["train"], dataset["test"]
     
     logger.info(f"Use device {'gpu' if torch.cuda.is_available() else 'cpu'}")
@@ -146,7 +153,7 @@ def main(cfg: DictConfig):
     def custom_collate(data):
         inputs = torch.stack([d['input_ids'] for d in data])
         attention_mask = torch.stack([d['attention_mask'] for d in data])
-        labels = torch.tensor([d['label']["pos_candidates"][0] for d in data]) # todo: only uses first positive
+        labels = torch.tensor([d['label'][0] for d in data]) # todo: only uses first positive
         return { 
             'input_ids': inputs,
             'attention_mask': attention_mask,
@@ -186,7 +193,7 @@ def main(cfg: DictConfig):
         # logging strategies
         logging_dir=f"{output_dir}/logs",
         logging_strategy="steps",
-        logging_steps=10,
+        logging_steps=5,
         save_strategy="no",
         **{k:v for k,v in config.items() if k != 'lora_config'}
     ) # TODO: move train arguments to config

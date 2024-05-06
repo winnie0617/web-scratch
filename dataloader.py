@@ -18,6 +18,8 @@ from tqdm import tqdm
 sys.path.append(pathlib.Path(__file__).parent.parent.absolute().as_posix())
 
 from data_utils.dom_utils import get_tree_repr, prune_tree
+from data_utils.html_utils import prune_dom_tree
+import json
 
 def format_candidate(dom_tree, candidate, keep_html_brackets=False):
     node_tree = prune_tree(dom_tree, [candidate["backend_node_id"]])
@@ -44,47 +46,68 @@ def format_candidate(dom_tree, candidate, keep_html_brackets=False):
         ancestor_repr = ""
     return f"ancestors: {ancestor_repr}\n" + f"target: {subtree_repr}"
     
+def get_previous_actions(dataset):
     
-def get_data_split(data_dir, split_file, is_train=False):
-    def flatten_actions(samples):
-        """ Creates one sample per action """
-        outputs = {
-            "website": [],
-            "confirmed_task": [],
-            "annotation_id": [],
-            "previous_actions": [],
-            "action_uid": [],
-            "operation": [],
-            "pos_candidates": [],
-            "neg_candidates": [], # Don't need neg_candidates in this case
-            "cleaned_html": [],
-        }
-        num_actions = [len(actions) for actions in samples["actions"]]
-        # Create number of sample per task = number of actions in the task
-        for key in ["website", "confirmed_task", "annotation_id"]:
-            for idx, value in enumerate(samples[key]):
-                outputs[key] += [value] * num_actions[idx]
-        for actions, action_reprs in zip(samples["actions"], samples["action_reprs"]):
-            for a_idx, action in enumerate(actions):
-                outputs["previous_actions"].append(action_reprs[:a_idx])
-                for key in [
-                    "action_uid",
-                    "operation",
-                    "pos_candidates",
-                    "neg_candidates", # Don't need neg_candidates in this case
-                    "cleaned_html",
-                ]:
-                    outputs[key].append(action[key])
-        return outputs
+    # Add column for previous_actions
+    previous_actions = []
+    next_actions = []
+    curr_actions = None
+    num_actions = 0
+    step = 0
+    for i in range(len(dataset)):    
+        if step == num_actions:
+            step = 0
+            curr_actions = dataset[i]["action_reprs"]
+            num_actions = len(curr_actions)
+        previous_actions.append(curr_actions[:step]) 
+        next_actions.append(curr_actions[step])
+        step += 1
 
-    dataset = load_dataset(data_dir, data_files=split_file, split="all")
-    flatten_dataset = dataset.map(
-        flatten_actions,
-        batched=True,
-        remove_columns=dataset.column_names, # remove all original columns?
-        batch_size=10,
-        num_proc=4,
-    )
+    dataset = dataset.add_column("previous_actions", previous_actions)
+    dataset = dataset.add_column("next_action", next_actions)
+    
+    return dataset 
+    
+# def get_data_split(data_dir, split_file, is_train=False):
+#     def flatten_actions(samples):
+#         """ Creates one sample per action """
+#         outputs = {
+#             "website": [],
+#             "confirmed_task": [],
+#             "annotation_id": [],
+#             "previous_actions": [],
+#             "action_uid": [],
+#             "operation": [],
+#             "pos_candidates": [],
+#             "neg_candidates": [], # Don't need neg_candidates in this case
+#             "cleaned_html": [],
+#         }
+#         num_actions = [len(actions) for actions in samples["actions"]]
+#         # Create number of sample per task = number of actions in the task
+#         for key in ["website", "confirmed_task", "annotation_id"]:
+#             for idx, value in enumerate(samples[key]):
+#                 outputs[key] += [value] * num_actions[idx]
+#         for actions, action_reprs in zip(samples["actions"], samples["action_reprs"]):
+#             for a_idx, action in enumerate(actions):
+#                 outputs["previous_actions"].append(action_reprs[:a_idx])
+#                 for key in [
+#                     "action_uid",
+#                     "operation",
+#                     "pos_candidates",
+#                     "neg_candidates", # Don't need neg_candidates in this case
+#                     "cleaned_html",
+#                 ]:
+#                     outputs[key].append(action[key])
+#         return outputs
+
+#     dataset = load_dataset(data_dir, data_files=split_file, split="all")
+#     flatten_dataset = dataset.map(
+#         flatten_actions,
+#         batched=True,
+#         remove_columns=dataset.column_names, # remove all original columns?
+#         batch_size=10,
+#         num_proc=4,
+#     )
 
     # def format_candidates(sample):
     #     dom_tree = lxml.etree.fromstring(sample["cleaned_html"])
@@ -171,7 +194,73 @@ def get_data_split(data_dir, split_file, is_train=False):
 #             seq_target += f"Value: {current_action_value}"
 #     return tree_repr, seq_input, seq_target, choices
 
+def prune_html(example):
+    elements_of_interest, mapping = prune_dom_tree(etree.fromstring(example["cleaned_html"]), return_mapping=True)
+    return {"cleaned_html": elements_of_interest, "mapping": mapping}
+
 def convert_to_qa_format(example):
+    """ 
+    Obtain the start and end char of the answer 
+    Add columns "question", "context", "answer",
+    Where answer is {"pos_candidates": idx, "neg_candidates": idx}
+    """
+    # dom_tree = lxml.etree.fromstring(example["cleaned_html"])
+    #TODO: might be possible to have more than one pos candidate
+    # answer_start_idxs = []
+    answer_end_idxs = []
+    # for all pos_candidates of the example
+    for candidate_str in example["pos_candidates"]:
+        json_data = json.loads(candidate_str)
+        element = json_data["tag"]
+        candidate = json.loads(json_data["attributes"])
+        pos_candidate_id = candidate["backend_node_id"]
+        # id_attr = f'id={pos_candidate_id}'
+         
+        idx = [i for i, sublist in enumerate(example["mapping"]) if pos_candidate_id in sublist]
+        if idx != []:
+            lens = map(len, example["cleaned_html"][:idx[0]+1]) # up to and including target element
+            # add 1 to each line excluding target line to account for newline character
+            element_end = sum(lens) + idx[0] - 1 # element end is the char index of ">"
+            answer_end_idxs.append(element_end)
+        
+    cleaned_html = "\n".join(example["cleaned_html"])
+
+    # # NOTE: Don't prune, just include the whole webpage
+    seq_input = (
+        "Based on the HTML webpage, try to complete the following task:\n"
+        f"Task: {example['confirmed_task']}\n"
+        f"Previous actions:\n"
+    )
+    # TODO: hard-coded
+    previous_k = 5
+    if len(example["previous_actions"]) > 0:
+        for action in example["previous_actions"][-previous_k:]:
+            seq_input += f"{action}\n"
+    else:
+        seq_input += "None\n"
+    seq_input += (
+        # "What should be the next action?"
+        # "Please select the element to interact with, and the action to perform along with the value to type in or select. "
+        # "If the task cannot be completed, output None."
+        "What should be the element to interact with next?"
+    )
+
+    # if gt == -1:
+    #     seq_target = "None"
+    # else:
+    #     current_action_op = sample["operation"]["op"]
+    #     current_action_value = sample["operation"]["value"]
+    #     seq_target = f"Element: {choices[gt][1]}\n"
+    #     seq_target += f"Action: {current_action_op}\n"
+    #     if current_action_op != "CLICK":
+    #         seq_target += f"Value: {current_action_value}"
+    example["question"] = seq_input
+    example["answers"] = answer_end_idxs
+    example["context"] = "\n".join(example["cleaned_html"])
+    # example["context"] = example["cleaned_html"]
+    return example
+
+def convert_to_qa_format_for_full_html(example):
     """ 
     Obtain the start and end char of the answer 
     Add columns "question", "context", "answer",
@@ -183,10 +272,15 @@ def convert_to_qa_format(example):
     answer_end_idxs = {"pos_candidates":[], "neg_candidates": []}
     # obtain indices for both positive and negative candidates
     for label in ["pos_candidates", "neg_candidates"]:
-        for candidate in example[label]:
+        for candidate_str in example[label]:
+            json_data = json.loads(candidate_str)
+            element = json_data["tag"]
+            candidate = json.loads(json_data["attributes"])
             pos_candidate_id = candidate["backend_node_id"]
             id_attr = f'backend_node_id="{pos_candidate_id}"'
-            idx = example["cleaned_html"].find(id_attr) # position of the 'b'
+            # TODO: can probably do better than old string manipulation method
+            cleaned_html = "\n".join(example["cleaned_html"])
+            idx = cleaned_html.find(id_attr) # position of the 'b'
             element_end = idx - 2
             # open_bracket = element_end
             # while open_bracket >= 0 and example["cleaned_html"][open_bracket] != "<":
@@ -197,30 +291,30 @@ def convert_to_qa_format(example):
             # answer_start_idxs.append(open_bracket)
             # search for end of the tag
             close_bracket = element_end
-            while close_bracket < len(example["cleaned_html"]) and example["cleaned_html"][close_bracket] != ">":
+            while close_bracket < len(cleaned_html) and cleaned_html[close_bracket] != ">":
                 close_bracket += 1
                 
             # if "/" appears before ">", then no closing tag
-            if example["cleaned_html"][close_bracket-1] == "/":
+            if cleaned_html[close_bracket-1] == "/":
                 answer_end_idxs[label].append(close_bracket)
             else:
                 # scan until matching closing tag is found
                 i = close_bracket
                 counts = 1
                 # TODO: handle out of index
-                while i < len(example["cleaned_html"]) and counts > 0:
-                    if example["cleaned_html"][i] == "<":
-                        if example["cleaned_html"][i+1] == "/" and example["cleaned_html"][i+2: i+2+len(element)] == element:
+                while i < len(cleaned_html) and counts > 0:
+                    if cleaned_html[i] == "<":
+                        if cleaned_html[i+1] == "/" and cleaned_html[i+2: i+2+len(element)] == element:
                             counts -= 1
                             i += len(element)
                             
-                        elif example["cleaned_html"][i+1: i+1+len(element)] == element:
+                        elif cleaned_html[i+1: i+1+len(element)] == element:
                             counts += 1
                             # Need to search till the ">" to make sure it is not self closing
                             j = i
-                            while j < len(example["cleaned_html"]) and example["cleaned_html"][j] != ">":
+                            while j < len(cleaned_html) and cleaned_html[j] != ">":
                                 j += 1
-                            if example["cleaned_html"][j-1] == "/":
+                            if cleaned_html[j-1] == "/":
                                 counts -= 1
                             i = j + 1
                     i += 1
@@ -228,7 +322,7 @@ def convert_to_qa_format(example):
                 # print("========")
                 # i+1 is the position of the closing bracket
                 # TODO: deal with these cases
-                if i == len(example["cleaned_html"]):
+                if i == len(cleaned_html):
                     print(i, candidate, close_bracket)
                 answer_end_idxs[label].append(i+1)
 
@@ -263,6 +357,7 @@ def convert_to_qa_format(example):
     #         seq_target += f"Value: {current_action_value}"
     example["question"] = seq_input
     example["answers"] = answer_end_idxs
+    example["context"] = "\n".join(example["cleaned_html"])
     # example["context"] = example["cleaned_html"]
     return example
 
@@ -284,17 +379,16 @@ def preprocess_training_examples(examples, tokenizer, max_context_len):
     # determine the start and end positions of the answer
     
     # offset_mapping[i]: a tuple indicating the token i’s start position and end position of the span of characters inside the original context
-    end_positions = {"pos_candidates":[], "neg_candidates": []}
+    end_positions = []
     offset_mapping = inputs.pop("offset_mapping")
-    for label in ["pos_candidates", "neg_candidates"]:
-        for char_idx in examples["answers"][label]:
-            idx = 0
-            while idx < len(offset_mapping) and offset_mapping[idx][0] < char_idx:
-                idx += 1
-            # "/>" could potentially occur, which is one single token
-            if inputs["input_ids"][idx-1] == 2720: # TODO: better way to not hardcode?
-                idx -= 1
-            end_positions[label].append(idx)
+    for char_idx in examples["answers"]:
+        idx = 0
+        while idx < len(offset_mapping) and offset_mapping[idx][0] < char_idx:
+            idx += 1
+        # "/>" could potentially occur, which is one single token
+        if inputs["input_ids"][idx-1] == 2720: # TODO: better way to not hardcode?
+            idx -= 1
+        end_positions.append(idx)
             # print(char_idx, offset_mapping[idx-1], offset_mapping[idx])
             # print(examples["context"][char_idx-1:char_idx+1], inputs["input_ids"][idx])
 

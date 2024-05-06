@@ -6,36 +6,37 @@ salient_attributes = ["type", "placeholder", "aria_label", "title", "alt", "clas
 black_listed_elements = set(["html", "head", "title", "meta", "iframe", "body", "script", "style", "path", "svg", "br", "::marker",])
 
 def add_to_hash_tree(hash_tree, tag, node):
-    
     node_id = node.attrib.get("backend_node_id", "-1")
     
     parent = node.getparent()
     if parent is None:
-        hash_tree[str(node_id)] = (False, None)
-        return (False, None)
+        hash_tree[str(node_id)] = (False, None, [])
+        return (False, None, [])
     
     parent_id_str = parent.get("backend_node_id", "-1")
     if parent_id_str == "-1":
-        hash_tree[str(node_id)] = (False, None)
-        return (False, None)
+        hash_tree[str(node_id)] = (False, None, [])
+        return (False, None, [])
     
     if not parent_id_str in hash_tree:
         add_to_hash_tree(hash_tree, tag, parent)
 
-    is_parent_desc_anchor, anchor_id = hash_tree[parent_id_str]
+    is_parent_desc_anchor, anchor_id, all_descendents = hash_tree[parent_id_str]
 
     # even if the anchor is nested in another anchor, we set the "root" for all descendants to be ::Self
     
-    if node.tag == tag: # account for div role="button"
-        value = (True, node_id)
+    # want anchor to have all_descendents
+    if node.tag == tag: 
+        value = (True, node_id, all_descendents + [node_id])
     elif (
         is_parent_desc_anchor
     ):  # reuse the parent's anchor_id (which could be much higher in the tree)
-        value = (True, anchor_id)
+        value = (True, anchor_id, all_descendents + [node_id])
     else:
         value = (
             False,
             None,
+            [],
         )  # not a descendant of an anchor, most likely it will become text, an interactive element or discarded
 
     hash_tree[str(node_id)] = value
@@ -44,7 +45,7 @@ def add_to_hash_tree(hash_tree, tag, node):
 
 def convert_name(node_name, has_click_handler):
     if node_name == "a":
-        return "link"
+        return "a"
     if node_name == "input":
         return "input"
     if node_name == "img":
@@ -56,7 +57,7 @@ def convert_name(node_name, has_click_handler):
     else:
         return "text"
     
-def prune_dom_tree(dom_tree):
+def prune_dom_tree(dom_tree, return_mapping=False):
     # Initialize caches
     child_nodes = {}
     anchor_ancestry = {"-1": (False, None)}
@@ -70,12 +71,14 @@ def prune_dom_tree(dom_tree):
         if "backend_node_id" not in node.attrib:
             continue
         
+        # TODO: better way to handle, and tab should not be button?
         # to deal with div role="button" case
-        if  node.attrib.get("role") == "button":
+
+        if node.attrib.get("role") == "button" or node.attrib.get("role") == "tab" or node.attrib.get("role") == "tab" or node.tag == "select":
             node.tag = "button"
         # this means ancestor is a button?
-        is_ancestor_of_anchor, anchor_id = add_to_hash_tree(anchor_ancestry, "a", node)
-        is_ancestor_of_button, button_id = add_to_hash_tree(button_ancestry, "button", node)
+        is_ancestor_of_anchor, anchor_id, all_ancestors_anchor = add_to_hash_tree(anchor_ancestry, "a", node)
+        is_ancestor_of_button, button_id, all_ancestors_button = add_to_hash_tree(button_ancestry, "button", node)
         
         # Skip blacklisted elements
         if node.tag in black_listed_elements:
@@ -131,8 +134,8 @@ def prune_dom_tree(dom_tree):
                         "key":  key,
                         "value": element_attributes[key]
                     })
-                else:
-                    meta_data.append(element_attributes[key])
+                # else:
+                meta_data.append(element_attributes[key])
 
         element_node_value = None
 
@@ -156,8 +159,15 @@ def prune_dom_tree(dom_tree):
         # remove redudant elements
         if ancestor_exception and (node.tag != "a" and node.tag != "button"):
             continue
-
+        
         # is_clickable = node.attrib.get("role") == "button" or node.attrib.get("role") == "link"
+        all_ancestors = (
+            [node.attrib["backend_node_id"]]
+            if not ancestor_exception
+            else all_ancestors_anchor
+            if is_ancestor_of_anchor
+            else all_ancestors_button
+            )
         elements.append(
             {
                 # "node_index": str(index),
@@ -165,6 +175,7 @@ def prune_dom_tree(dom_tree):
                 "node_name": node.tag,
                 "node_value": element_node_value,
                 "node_meta": meta_data,
+                "all_ancestors": all_ancestors,
                 # "is_clickable": is_clickable,
                 # "origin_x": int(x),
                 # "origin_y": int(y),
@@ -172,14 +183,16 @@ def prune_dom_tree(dom_tree):
                 # "center_y": int(y + (height / 2)),
             }
         )
-        elements_of_interest= []
-        # Use original backend_node_id instead of id_counter for easier matching back to the original element
-        # id_counter 			= 0
+    elements_of_interest = []
+    mapping = []
+    # Use original backend_node_id instead of id_counter for easier matching back to the original element
+    # id_counter 			= 0
 
     for element in elements:
         back_node_id = element.get("backend_node_id")
         node_name = element.get("node_name")
         node_value = element.get("node_value")
+        all_ancestors = element.get("all_ancestors")
         # is_clickable = element.get("is_clickable")
         # origin_x = element.get("origin_x")
         # origin_y = element.get("origin_y")
@@ -215,12 +228,11 @@ def prune_dom_tree(dom_tree):
 
         converted_node_name = convert_name(node_name, False)
 
-            
         # skip elements that are not of interest
         # not very elegant, more like a placeholder
         if (
             (converted_node_name != "button" or meta == "") # empty button (?)
-            and converted_node_name != "link"
+            and converted_node_name != "a"
             and converted_node_name != "input"
             and converted_node_name != "img"
             and converted_node_name != "textarea"
@@ -228,7 +240,18 @@ def prune_dom_tree(dom_tree):
             continue
         
         # page_element_buffer[id_counter] = element
+        if return_mapping:
+            # # Format elements into HTML-like tags
+            # if inner_text != "": 
+            #     elements_of_interest.append(
+            #         f"""<{converted_node_name} {meta}>{inner_text}</{converted_node_name}>"""
+            #     )
+            # else:
+            #     elements_of_interest.append(f"""<{converted_node_name} {meta}/>""")
+            
+            mapping.append(all_ancestors)
 
+        # else:
         # Format elements into HTML-like tags
         if inner_text != "": 
             elements_of_interest.append(
@@ -239,5 +262,7 @@ def prune_dom_tree(dom_tree):
                 f"""<{converted_node_name} id={back_node_id}{meta}/>"""
             )
         # id_counter += 1
-    
+
+    if return_mapping:
+        return elements_of_interest, mapping
     return elements_of_interest

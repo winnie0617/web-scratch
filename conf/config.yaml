@@ -5,8 +5,8 @@ defaults:
 train:
   # neg_ratio: 5
   batch_size: 1
-  learning_rate: 3e-5
-  gradient_accumulation_steps: 8
+  learning_rate: 3e-4
+  gradient_accumulation_steps: 32
   epoch: 1
   warmup_steps: 0.5
   use_amp: True
@@ -14,17 +14,17 @@ train:
 eval:
   eval_batch_size: 1
   eval_accumulation_steps: 32
-  eval_steps: 20
+  eval_steps: 10
 
 seed: 123
 
 data:
-  data_path: Mind2Web
-  train_split_file: data/train/*.json
-  test_split_files:
-    test_task: data/test_task/*.json
-    test_website: data/test_website/*.json
-    test_domain: data/test_domain/*.json
+  data_path: osunlp/Multimodal-Mind2Web
+  # train_split_file: data/train/*.json
+  # test_split_files:
+  #   test_task: data/test_task/*.json
+  #   test_website: data/test_website/*.json
+  #   test_domain: data/test_domain/*.json
 
 hydra:
   run:
