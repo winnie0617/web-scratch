@@ -20,6 +20,7 @@ from dataloader import prune_html, get_previous_actions
 
 logger = logging.getLogger(__name__)
 
+checkpoint = None
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig):
@@ -30,12 +31,18 @@ def main(cfg: DictConfig):
     #     cfg.data.data_path, cfg.data.train_split_file, is_train=True
     # )
     
-
-    
     train_dataset = load_dataset(cfg.data.data_path, split="train") # TODO: only use 1000 for now
     cols_to_remove = set(train_dataset.column_names)
-
-    train_dataset = train_dataset.map(prune_html, batched=False) #
+    
+    print("Before filtering")
+    print(train_dataset)
+    
+    # TODO: handle case where mind2web ranking model remove pos_candidates
+    print("After filtering for empty pos_candidate")
+    train_dataset = train_dataset.filter(lambda x: len(x)>=1, input_columns=['pos_candidates'])
+    print(train_dataset)
+        
+    train_dataset = train_dataset.map(prune_html, batched=False, load_from_cache_file=False) # don't use cache
 
     train_dataset = get_previous_actions(train_dataset)
     train_dataset = train_dataset.map(
@@ -44,10 +51,8 @@ def main(cfg: DictConfig):
         remove_columns=list(cols_to_remove)
     )
     # filter data where answer is None
-    print("Before filtering for elements that cannot be located")
-    print(train_dataset)
     train_dataset = train_dataset.filter(lambda x: x["answers"] != [])
-    print("After filtering")
+    print("After filteringfor elements that cannot be located")
     print(train_dataset)
     train_dataset = train_dataset.filter(lambda x: len(x["context"]) < 50000)
     print("More filtering")
@@ -104,6 +109,14 @@ def main(cfg: DictConfig):
     model.enable_input_require_grads()
     model = get_peft_model(model, lora_config)
     # model.model.model.embed_tokens.weight.requires_grad = True
+    if checkpoint:
+        # from peft import PeftModel
+        # model = PeftModel.from_pretrained(model, checkpoint, config=lora_config)
+        
+        from peft import load_peft_weights, set_peft_model_state_dict
+        lora_weights = load_peft_weights(checkpoint)
+        set_peft_model_state_dict(model, lora_weights)
+    
     model.print_trainable_parameters()
 
     # Set up the trainer
@@ -194,7 +207,11 @@ def main(cfg: DictConfig):
         logging_dir=f"{output_dir}/logs",
         logging_strategy="steps",
         logging_steps=5,
-        save_strategy="no",
+        # save model strategies
+        save_strategy="steps",
+        save_steps=10,
+        save_total_limit=1,
+        remove_unused_columns=False,
         **{k:v for k,v in config.items() if k != 'lora_config'}
     ) # TODO: move train arguments to config
 
@@ -208,8 +225,13 @@ def main(cfg: DictConfig):
         tokenizer=tokenizer,
         data_collator=custom_collate,
     )
+    
+    if not checkpoint:
+        trainer.train()
+    else:
+        trainer.train(resume_from_checkpoint=checkpoint)
 
-    trainer.train()
+        trainer.train()
 
 if __name__ == "__main__":
     main()

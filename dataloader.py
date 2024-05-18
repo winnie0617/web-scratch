@@ -195,7 +195,15 @@ def get_previous_actions(dataset):
 #     return tree_repr, seq_input, seq_target, choices
 
 def prune_html(example):
+    # save example["cleaned_html"] for debugging
+    # tid = json.loads(json.loads(example['pos_candidates'][0])["attributes"])["backend_node_id"]
+    # with open(f"{tid}_cleaned_html.txt", "w") as f:
+    #     f.write(example["cleaned_html"])
     elements_of_interest, mapping = prune_dom_tree(etree.fromstring(example["cleaned_html"]), return_mapping=True)
+    # with open(f"{tid}_pruned_html.txt", "w") as f:
+    #     # write elements_of_interest one line per element
+    #     for element in elements_of_interest:
+    #         f.write(element + "\n")
     return {"cleaned_html": elements_of_interest, "mapping": mapping}
 
 def convert_to_qa_format(example):
@@ -214,6 +222,7 @@ def convert_to_qa_format(example):
         element = json_data["tag"]
         candidate = json.loads(json_data["attributes"])
         pos_candidate_id = candidate["backend_node_id"]
+
         # id_attr = f'id={pos_candidate_id}'
          
         idx = [i for i, sublist in enumerate(example["mapping"]) if pos_candidate_id in sublist]
@@ -223,7 +232,7 @@ def convert_to_qa_format(example):
             element_end = sum(lens) + idx[0] - 1 # element end is the char index of ">"
             answer_end_idxs.append(element_end)
         
-    cleaned_html = "\n".join(example["cleaned_html"])
+    # cleaned_html = "\n".join(example["cleaned_html"])
 
     # # NOTE: Don't prune, just include the whole webpage
     seq_input = (
@@ -238,11 +247,18 @@ def convert_to_qa_format(example):
             seq_input += f"{action}\n"
     else:
         seq_input += "None\n"
+    # seq_input += (
+    #     # "What should be the next action?"
+    #     # "Please select the element to interact with, and the action to perform along with the value to type in or select. "
+    #     # "If the task cannot be completed, output None."
+    #     "What should be the element to interact with next?"
+    # )
     seq_input += (
-        # "What should be the next action?"
-        # "Please select the element to interact with, and the action to perform along with the value to type in or select. "
-        # "If the task cannot be completed, output None."
-        "What should be the element to interact with next?"
+        "Required action:\n"
+        f"{example['next_action']}\n"        
+    )
+    seq_input += (
+        "What should be the element to interact with given the required action?"
     )
 
     # if gt == -1:
@@ -256,6 +272,9 @@ def convert_to_qa_format(example):
     #         seq_target += f"Value: {current_action_value}"
     example["question"] = seq_input
     example["answers"] = answer_end_idxs
+    # if example["answers"] == []:
+    #     print(element, candidate)
+    #     print("====================")
     example["context"] = "\n".join(example["cleaned_html"])
     # example["context"] = example["cleaned_html"]
     return example

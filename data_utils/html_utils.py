@@ -73,7 +73,7 @@ def prune_dom_tree(dom_tree, return_mapping=False):
         
         # TODO: better way to handle, and tab should not be button?
         # to deal with div role="button" case
-
+        
         if node.attrib.get("role") == "button" or node.attrib.get("role") == "tab" or node.attrib.get("role") == "tab" or node.tag == "select":
             node.tag = "button"
         # this means ancestor is a button?
@@ -202,7 +202,7 @@ def prune_dom_tree(dom_tree, return_mapping=False):
 
         inner_text = f"{node_value} " if node_value else ""
         meta = ""
-            
+        
         if back_node_id in child_nodes:
             for child in child_nodes.get(back_node_id):
                 entry_type = child.get('type')
@@ -227,7 +227,7 @@ def prune_dom_tree(dom_tree, return_mapping=False):
                 inner_text = meta_data["aria-label"].strip()
 
         converted_node_name = convert_name(node_name, False)
-
+    
         # skip elements that are not of interest
         # not very elegant, more like a placeholder
         if (
@@ -237,8 +237,10 @@ def prune_dom_tree(dom_tree, return_mapping=False):
             and converted_node_name != "img"
             and converted_node_name != "textarea"
         ) and inner_text.strip() == "":
+            # ) and (inner_text.strip() == "" and meta == ""): # keep if meta not empty
             continue
-        
+
+            
         # page_element_buffer[id_counter] = element
         if return_mapping:
             # # Format elements into HTML-like tags
@@ -262,7 +264,7 @@ def prune_dom_tree(dom_tree, return_mapping=False):
                 f"""<{converted_node_name} id={back_node_id}{meta}/>"""
             )
         # id_counter += 1
-
+        
     if return_mapping:
         return elements_of_interest, mapping
     return elements_of_interest
