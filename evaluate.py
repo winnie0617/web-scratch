@@ -20,7 +20,7 @@ from dataloader import prune_html, get_previous_actions
 
 logger = logging.getLogger(__name__)
 
-checkpoint = "output/checkpoint-150"
+checkpoint = "checkpoint-60"
 
 
     
@@ -197,7 +197,7 @@ def main(cfg: DictConfig):
         print(dataset)
 
         
-        dataset = dataset.map(prune_html, batched=False) #, load_from_cache_file=False
+        dataset = dataset.map(prune_html, batched=False) #
 
         dataset = get_previous_actions(dataset)
         
@@ -208,7 +208,8 @@ def main(cfg: DictConfig):
         dataset = dataset.map(
             convert_to_qa_format,
             batched=False,
-            remove_columns=list(cols_to_remove)
+            remove_columns=list(cols_to_remove),
+            load_from_cache_file=False
         )
         # filter data where answer is None
         

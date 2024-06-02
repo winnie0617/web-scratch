@@ -247,19 +247,10 @@ def convert_to_qa_format(example):
             seq_input += f"{action}\n"
     else:
         seq_input += "None\n"
-    # seq_input += (
-    #     # "What should be the next action?"
-    #     # "Please select the element to interact with, and the action to perform along with the value to type in or select. "
-    #     # "If the task cannot be completed, output None."
-    #     "What should be the element to interact with next?"
-    # )
     seq_input += (
-        "Required action:\n"
-        f"{example['next_action']}\n"        
+        "What should be the element to interact with next?"
     )
-    seq_input += (
-        "What should be the element to interact with given the required action?"
-    )
+
 
     # if gt == -1:
     #     seq_target = "None"
